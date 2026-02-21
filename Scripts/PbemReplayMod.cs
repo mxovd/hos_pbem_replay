@@ -117,6 +117,8 @@ internal static class PbemReplayRuntime
 
     private const float ReplayZoomUpperBound = 28f;
 
+    private const float ReplayHiddenScale = 0.0001f;
+
     private static byte[] _currentTurnStartSnapshotBytes;
 
     private static bool _isReplayingFromSnapshot;
@@ -132,6 +134,10 @@ internal static class PbemReplayRuntime
     private static bool _didLoadReplaySpeedSetting;
 
     private static float _replaySpeedSetting = ReplaySpeedDefault;
+
+    private static readonly Dictionary<string, int> ReplayFogSuppressedUnits = new Dictionary<string, int>(StringComparer.Ordinal);
+
+    private static readonly Dictionary<string, Vector3> ReplayFogSuppressedScales = new Dictionary<string, Vector3>(StringComparer.Ordinal);
 
     private static List<ReplayRpcAction> _pendingReplayActions;
 
@@ -224,6 +230,233 @@ internal static class PbemReplayRuntime
     private static IEnumerator CR_Empty()
     {
         yield break;
+    }
+
+    public static void TryApplyFogSafeMoveVisibility(MultiplayerManager p_manager, byte[] p_bytes)
+    {
+        if (!_isReplayingFromSnapshot || p_manager == null || p_bytes == null || p_bytes.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            object[] payload = (object[])Utils.ConvertByteArrayToObject(p_bytes);
+            if (payload == null || payload.Length < 2 || !(payload[0] is Unit rpcUnit) || !(payload[1] is List<Tile.Coordinates> pathCoords) || pathCoords.Count < 2)
+            {
+                return;
+            }
+
+            Player viewer = TurnManager.humanPlayer ?? TurnManager.currPlayer;
+            if (viewer == null || GameData.Instance?.map == null)
+            {
+                return;
+            }
+
+            if (!GameData.Instance.TryFindPlayerByName(rpcUnit.OwnerName, out Player ownerPlayer) || ownerPlayer == null || viewer.IsAlliedWith(ownerPlayer))
+            {
+                return;
+            }
+
+            Unit liveUnit = ownerPlayer.ListOfUnits.FirstOrDefault(u => u != null && u.ID == rpcUnit.ID);
+            UnitGO unitGO = liveUnit?.unitGO;
+            if (unitGO == null || unitGO.gameObject == null)
+            {
+                return;
+            }
+
+            int firstVisibleIndex = GetFirstVisiblePathIndex(pathCoords);
+            List<Vector2> pathWorldPoints = BuildPathWorldPoints(pathCoords);
+            string suppressionKey = BuildFogSuppressionKey(ownerPlayer.Name, liveUnit.ID);
+            if (firstVisibleIndex == 0)
+            {
+                ReplayFogSuppressedUnits.Remove(suppressionKey);
+                RestoreFogSuppressedVisual(suppressionKey, unitGO);
+                return;
+            }
+
+            int generation = 1;
+            if (ReplayFogSuppressedUnits.TryGetValue(suppressionKey, out int currentGeneration))
+            {
+                generation = currentGeneration + 1;
+            }
+            ReplayFogSuppressedUnits[suppressionKey] = generation;
+            ApplyFogSuppressedVisual(suppressionKey, unitGO);
+
+            p_manager.StartCoroutine(CR_KeepUnitHiddenUntilVisible(suppressionKey, generation, unitGO, pathWorldPoints, firstVisibleIndex));
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("[pbem_replay] Failed to apply fog-safe move visibility: " + ex.Message);
+        }
+    }
+
+    private static int GetFirstVisiblePathIndex(List<Tile.Coordinates> p_pathCoords)
+    {
+        if (p_pathCoords == null || p_pathCoords.Count == 0 || GameData.Instance?.map == null)
+        {
+            return -1;
+        }
+
+        for (int i = 0; i < p_pathCoords.Count; i++)
+        {
+            Tile.Coordinates coords = p_pathCoords[i];
+            Tile tile = GameData.Instance.map.TilesTable[coords.X, coords.Y];
+            if (tile?.tileGO != null && !tile.tileGO.isInFogOfWar)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static string BuildFogSuppressionKey(string p_ownerName, int p_unitId)
+    {
+        return (p_ownerName ?? string.Empty) + "#" + p_unitId;
+    }
+
+    private static List<Vector2> BuildPathWorldPoints(List<Tile.Coordinates> p_pathCoords)
+    {
+        List<Vector2> points = new List<Vector2>();
+        if (p_pathCoords == null || GameData.Instance?.map == null)
+        {
+            return points;
+        }
+
+        foreach (Tile.Coordinates coords in p_pathCoords)
+        {
+            Tile tile = GameData.Instance.map.TilesTable[coords.X, coords.Y];
+            if (tile?.tileGO == null)
+            {
+                continue;
+            }
+
+            Vector3 pos = tile.tileGO.transform.position;
+            points.Add(new Vector2(pos.x, pos.y));
+        }
+
+        return points;
+    }
+
+    private static int GetNearestPathIndex(List<Vector2> p_pathWorldPoints, Vector2 p_worldPos)
+    {
+        if (p_pathWorldPoints == null || p_pathWorldPoints.Count == 0)
+        {
+            return -1;
+        }
+
+        int bestIndex = 0;
+        float bestDistanceSq = float.MaxValue;
+        for (int i = 0; i < p_pathWorldPoints.Count; i++)
+        {
+            float distSq = (p_pathWorldPoints[i] - p_worldPos).sqrMagnitude;
+            if (distSq < bestDistanceSq)
+            {
+                bestDistanceSq = distSq;
+                bestIndex = i;
+            }
+        }
+
+        return bestIndex;
+    }
+
+    private static bool IsSuppressionCurrent(string p_suppressionKey, int p_generation)
+    {
+        return ReplayFogSuppressedUnits.TryGetValue(p_suppressionKey, out int currentGeneration) && currentGeneration == p_generation;
+    }
+
+    private static void ApplyFogSuppressedVisual(string p_suppressionKey, UnitGO p_unitGO)
+    {
+        if (p_unitGO == null || p_unitGO.transform == null)
+        {
+            return;
+        }
+
+        if (!ReplayFogSuppressedScales.ContainsKey(p_suppressionKey))
+        {
+            ReplayFogSuppressedScales[p_suppressionKey] = p_unitGO.transform.localScale;
+        }
+
+        Vector3 originalScale = ReplayFogSuppressedScales[p_suppressionKey];
+        float x = Mathf.Sign(originalScale.x);
+        float y = Mathf.Sign(originalScale.y);
+        float z = Mathf.Sign(originalScale.z);
+        if (x == 0f) x = 1f;
+        if (y == 0f) y = 1f;
+        if (z == 0f) z = 1f;
+
+        p_unitGO.transform.localScale = new Vector3(x * ReplayHiddenScale, y * ReplayHiddenScale, z * ReplayHiddenScale);
+    }
+
+    private static void RestoreFogSuppressedVisual(string p_suppressionKey, UnitGO p_unitGO)
+    {
+        if (!ReplayFogSuppressedScales.TryGetValue(p_suppressionKey, out Vector3 originalScale))
+        {
+            return;
+        }
+
+        if (p_unitGO != null && p_unitGO.transform != null)
+        {
+            p_unitGO.transform.localScale = originalScale;
+        }
+
+        ReplayFogSuppressedScales.Remove(p_suppressionKey);
+    }
+
+    private static void CompleteSuppressionIfCurrent(string p_suppressionKey, int p_generation)
+    {
+        if (IsSuppressionCurrent(p_suppressionKey, p_generation))
+        {
+            ReplayFogSuppressedUnits.Remove(p_suppressionKey);
+            ReplayFogSuppressedScales.Remove(p_suppressionKey);
+        }
+    }
+
+    private static IEnumerator CR_KeepUnitHiddenUntilVisible(string p_suppressionKey, int p_generation, UnitGO p_unitGO, List<Vector2> p_pathWorldPoints, int p_firstVisibleIndex)
+    {
+        if (p_unitGO == null || p_unitGO.gameObject == null)
+        {
+            CompleteSuppressionIfCurrent(p_suppressionKey, p_generation);
+            yield break;
+        }
+
+        while (_isReplayingFromSnapshot && p_unitGO != null && p_unitGO.gameObject != null)
+        {
+            if (!IsSuppressionCurrent(p_suppressionKey, p_generation))
+            {
+                yield break;
+            }
+
+            bool shouldHide = false;
+            if (p_firstVisibleIndex < 0)
+            {
+                shouldHide = p_unitGO.isMoving || p_unitGO.tileGO == null || p_unitGO.tileGO.isInFogOfWar;
+            }
+            else
+            {
+                Vector3 unitPos3 = p_unitGO.transform.position;
+                int nearestIndex = GetNearestPathIndex(p_pathWorldPoints, new Vector2(unitPos3.x, unitPos3.y));
+                shouldHide = nearestIndex < 0 || nearestIndex < p_firstVisibleIndex;
+            }
+
+            if (shouldHide)
+            {
+                ApplyFogSuppressedVisual(p_suppressionKey, p_unitGO);
+
+                yield return null;
+                continue;
+            }
+
+            break;
+        }
+
+        if (p_unitGO != null && p_unitGO.gameObject != null && IsSuppressionCurrent(p_suppressionKey, p_generation))
+        {
+            RestoreFogSuppressedVisual(p_suppressionKey, p_unitGO);
+        }
+
+        CompleteSuppressionIfCurrent(p_suppressionKey, p_generation);
     }
 
     public static void HandleTurnStart(TurnManager p_turnManager)
@@ -643,6 +876,8 @@ internal static class PbemReplayRuntime
         _startedReplayCoroutine = false;
         _suppressScenarioIntroPanel = false;
         _isReplayPromptCoroutineRunning = false;
+        ReplayFogSuppressedUnits.Clear();
+        ReplayFogSuppressedScales.Clear();
         _pendingReplayActions = null;
         _authoritativeFinalSnapshotBytes = null;
         _authoritativeBatches = null;
@@ -966,6 +1201,16 @@ internal static class PbemReplayRpcCapturePatches
         PbemReplayRuntime.CaptureRpcCall(p_RPCname, p_args);
     }
 
+}
+
+[HarmonyPatch(typeof(MultiplayerManager), "RPC_MoveUnit")]
+internal static class PbemReplayMoveVisibilityPatch
+{
+    [HarmonyPrefix]
+    private static void Prefix(MultiplayerManager __instance, byte[] p_bytes)
+    {
+        PbemReplayRuntime.TryApplyFogSafeMoveVisibility(__instance, p_bytes);
+    }
 }
 
 [HarmonyPatch(typeof(ServerGameService), "EndTurn")]
