@@ -109,6 +109,8 @@ internal static class PbemReplayRuntime
 
     private static bool _startedReplayCoroutine;
 
+    private static bool _suppressScenarioIntroPanel;
+
     private static List<ReplayRpcAction> _pendingReplayActions;
 
     private static byte[] _authoritativeFinalSnapshotBytes;
@@ -116,6 +118,23 @@ internal static class PbemReplayRuntime
     private static List<ReplayTurnBatch> _authoritativeBatches;
 
     public static bool IsReplaying => _isReplayingFromSnapshot;
+
+    public static void TryHideScenarioIntroPanel(MapGO p_mapGo)
+    {
+        if (!_suppressScenarioIntroPanel || p_mapGo == null || p_mapGo.startScenario_Panel == null)
+        {
+            return;
+        }
+
+        try
+        {
+            p_mapGo.startScenario_Panel.SetActive(false);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("[pbem_replay] Failed to suppress scenario intro panel: " + ex.Message);
+        }
+    }
 
     public static bool ShouldCaptureActions()
     {
@@ -321,6 +340,7 @@ internal static class PbemReplayRuntime
             _pendingReplayActions = pendingActions;
             _isReplayingFromSnapshot = true;
             _startedReplayCoroutine = false;
+            _suppressScenarioIntroPanel = true;
 
             GameData snapshotData = (GameData)Utils.ConvertByteArrayToObject(anchorSnapshotBytes);
             if (snapshotData == null)
@@ -451,6 +471,7 @@ internal static class PbemReplayRuntime
     {
         _isReplayingFromSnapshot = false;
         _startedReplayCoroutine = false;
+        _suppressScenarioIntroPanel = false;
         _pendingReplayActions = null;
         _authoritativeFinalSnapshotBytes = null;
         _authoritativeBatches = null;
@@ -549,5 +570,25 @@ internal static class PbemReplayTurnStartPatch
         }
 
         PbemReplayRuntime.TryStartReplayCoroutine(__instance);
+    }
+}
+
+[HarmonyPatch(typeof(MapGO), "Awake")]
+internal static class PbemReplayScenarioIntroPanelPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix(MapGO __instance)
+    {
+        PbemReplayRuntime.TryHideScenarioIntroPanel(__instance);
+    }
+}
+
+[HarmonyPatch(typeof(UIManager), "Start")]
+internal static class PbemReplayUiStartPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix()
+    {
+        PbemReplayRuntime.TryHideScenarioIntroPanel(MapGO.instance);
     }
 }
