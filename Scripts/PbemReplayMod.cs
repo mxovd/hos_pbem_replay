@@ -113,6 +113,10 @@ internal static class PbemReplayRuntime
 
     private const float ReplayMoveSettleTimeoutSeconds = 20f;
 
+    private const float ReplayZoomFactor = 0.55f;
+
+    private const float ReplayZoomUpperBound = 28f;
+
     private static byte[] _currentTurnStartSnapshotBytes;
 
     private static bool _isReplayingFromSnapshot;
@@ -136,13 +140,6 @@ internal static class PbemReplayRuntime
     private static List<ReplayTurnBatch> _authoritativeBatches;
 
     public static bool IsReplaying => _isReplayingFromSnapshot;
-
-    public static bool ShouldSuppressCameraRecentering() => _isReplayingFromSnapshot;
-
-    public static IEnumerator GetEmptyCoroutine()
-    {
-        yield break;
-    }
 
     private static float GetReplaySpeedSetting()
     {
@@ -177,6 +174,56 @@ internal static class PbemReplayRuntime
     {
         float speed = Mathf.Max(ReplaySpeedMin, GetReplaySpeedSetting());
         return Mathf.Max(0.01f, p_seconds / speed);
+    }
+
+    public static bool TryHandleReplayCameraRecentering(Vector3 p_targetWorldPos, ref float p_duration, ref IEnumerator o_result)
+    {
+        if (!_isReplayingFromSnapshot)
+        {
+            return false;
+        }
+
+        Camera cam = CameraGO.instance != null ? CameraGO.instance.cam : Camera.main;
+        if (cam == null)
+        {
+            return false;
+        }
+
+        Vector3 samplePos = p_targetWorldPos;
+        float minVisibleZ = cam.transform.position.z + Mathf.Max(1f, cam.nearClipPlane + 0.5f);
+        if (samplePos.z <= minVisibleZ)
+        {
+            samplePos.z = minVisibleZ;
+        }
+
+        Vector3 viewportPos = cam.WorldToViewportPoint(samplePos);
+        if (viewportPos.z <= 0f)
+        {
+            return false;
+        }
+
+        // Use an asymmetric safe frame so actions near UI-heavy edges (right/bottom) trigger recenter sooner.
+        const float leftSafeMargin = 0.08f;
+        const float rightSafeMargin = 0.28f;
+        const float bottomSafeMargin = 0.20f;
+        const float topSafeMargin = 0.12f;
+        bool isInsideFrame = viewportPos.x >= leftSafeMargin
+            && viewportPos.x <= 1f - rightSafeMargin
+            && viewportPos.y >= bottomSafeMargin
+            && viewportPos.y <= 1f - topSafeMargin;
+        if (isInsideFrame)
+        {
+            o_result = CR_Empty();
+            return true;
+        }
+
+        p_duration = Mathf.Max(p_duration, 0.32f);
+        return false;
+    }
+
+    private static IEnumerator CR_Empty()
+    {
+        yield break;
     }
 
     public static void HandleTurnStart(TurnManager p_turnManager)
@@ -461,9 +508,22 @@ internal static class PbemReplayRuntime
         bool quickMovementBackup = PlayerSettings.Instance.IsQuickMovement;
         bool followAIMovesBackup = PlayerSettings.Instance.FollowAIMoves;
         float timeScaleBackup = Time.timeScale;
+        float cameraZoomBackup = -1f;
+        float cameraTargetZoomBackup = -1f;
         PlayerSettings.Instance.IsQuickMovement = false;
-        PlayerSettings.Instance.FollowAIMoves = false;
+        PlayerSettings.Instance.FollowAIMoves = true;
         Time.timeScale = GetReplaySpeedSetting();
+
+        CameraGO cameraGo = CameraGO.instance;
+        if (cameraGo != null && cameraGo.cam != null)
+        {
+            cameraZoomBackup = cameraGo.cam.orthographicSize;
+            cameraTargetZoomBackup = cameraGo.targetZoom;
+            float desiredReplayZoom = Mathf.Clamp(cameraZoomBackup * ReplayZoomFactor, cameraGo.minZoom, Mathf.Min(cameraGo.maxZoom, ReplayZoomUpperBound));
+            desiredReplayZoom = Mathf.Min(desiredReplayZoom, cameraZoomBackup);
+            cameraGo.targetZoom = desiredReplayZoom;
+            cameraGo.cam.orthographicSize = desiredReplayZoom;
+        }
 
         try
         {
@@ -501,6 +561,11 @@ internal static class PbemReplayRuntime
             Time.timeScale = timeScaleBackup;
             PlayerSettings.Instance.IsQuickMovement = quickMovementBackup;
             PlayerSettings.Instance.FollowAIMoves = followAIMovesBackup;
+            if (cameraGo != null && cameraGo.cam != null && cameraZoomBackup > 0f)
+            {
+                cameraGo.targetZoom = cameraTargetZoomBackup > 0f ? cameraTargetZoomBackup : cameraZoomBackup;
+                cameraGo.cam.orthographicSize = cameraZoomBackup;
+            }
         }
 
         UIManager.ShowMessage("PBEM replay finished.");
@@ -944,17 +1009,16 @@ internal static class PbemReplayUiStartPatch
 }
 
 [HarmonyPatch(typeof(UIManager), "CenterCameraOnUnitCoroutine")]
-internal static class PbemReplaySuppressCameraRecenteringPatch
+internal static class PbemReplayCameraRecenteringPatch
 {
     [HarmonyPrefix]
-    private static bool Prefix(ref IEnumerator __result)
+    private static bool Prefix(Vector3 pos2, ref float duration, ref IEnumerator __result)
     {
-        if (!PbemReplayRuntime.ShouldSuppressCameraRecentering())
+        if (PbemReplayRuntime.TryHandleReplayCameraRecentering(pos2, ref duration, ref __result))
         {
-            return true;
+            return false;
         }
 
-        __result = PbemReplayRuntime.GetEmptyCoroutine();
-        return false;
+        return true;
     }
 }
