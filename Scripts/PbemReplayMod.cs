@@ -8,6 +8,8 @@ using System.Reflection;
 using System.Threading;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UI;
+using TMPro;
 
 class PbemReplayMod : GameModification
 {
@@ -111,6 +113,8 @@ internal static class PbemReplayRuntime
 
     private static bool _suppressScenarioIntroPanel;
 
+    private static bool _isReplayPromptCoroutineRunning;
+
     private static List<ReplayRpcAction> _pendingReplayActions;
 
     private static byte[] _authoritativeFinalSnapshotBytes;
@@ -118,6 +122,25 @@ internal static class PbemReplayRuntime
     private static List<ReplayTurnBatch> _authoritativeBatches;
 
     public static bool IsReplaying => _isReplayingFromSnapshot;
+
+    public static void HandleTurnStart(TurnManager p_turnManager)
+    {
+        OnTurnSceneStarted();
+
+        if (_isReplayingFromSnapshot)
+        {
+            TryStartReplayCoroutine(p_turnManager);
+            return;
+        }
+
+        if (ConsumeAuthoritativeFinalStateAppliedFlag())
+        {
+            TryShowReplayPrompt(p_turnManager, p_isReplayAgainPrompt: true);
+            return;
+        }
+
+        TryShowReplayPrompt(p_turnManager, p_isReplayAgainPrompt: false);
+    }
 
     public static void TryHideScenarioIntroPanel(MapGO p_mapGo)
     {
@@ -284,51 +307,7 @@ internal static class PbemReplayRuntime
         }
 
         GameData current = GameData.Instance;
-        if (current == null || !current.isPBEM || current.sessionID == Guid.Empty)
-        {
-            return false;
-        }
-
-        if (!current.ModDataBag.TryGet(ReplayBatchesKey, out List<ReplayTurnBatch> authoritativeBatches) || authoritativeBatches == null || authoritativeBatches.Count == 0)
-        {
-            return false;
-        }
-
-        long anchorSequence = 0;
-        byte[] anchorSnapshotBytes = null;
-
-        if (TryLoadLocalSnapshotEnvelope(current.sessionID, out ReplaySnapshotEnvelope envelope) && envelope?.SnapshotBytes != null && envelope.SnapshotBytes.Length > 0)
-        {
-            anchorSequence = envelope.LastKnownSequence;
-            anchorSnapshotBytes = envelope.SnapshotBytes;
-        }
-        else if (current.ModDataBag.TryGet(ReplayBaselineSnapshotKey, out byte[] baselineBytes) && baselineBytes != null && baselineBytes.Length > 0)
-        {
-            anchorSequence = 0;
-            anchorSnapshotBytes = baselineBytes;
-        }
-        else
-        {
-            return false;
-        }
-
-        long maxSequence = authoritativeBatches.Max(b => b.Sequence);
-        if (maxSequence <= anchorSequence)
-        {
-            return false;
-        }
-
-        List<ReplayTurnBatch> pendingBatches = authoritativeBatches
-            .Where(b => b.Sequence > anchorSequence)
-            .OrderBy(b => b.Sequence)
-            .ToList();
-
-        List<ReplayRpcAction> pendingActions = pendingBatches
-            .SelectMany(b => b.Actions ?? new List<ReplayRpcAction>())
-            .Where(a => a != null && !string.IsNullOrEmpty(a.RpcName) && a.Payload != null)
-            .ToList();
-
-        if (pendingActions.Count == 0)
+        if (!TryBuildReplayBootstrapData(current, out List<ReplayTurnBatch> authoritativeBatches, out byte[] anchorSnapshotBytes, out List<ReplayRpcAction> pendingActions))
         {
             return false;
         }
@@ -365,6 +344,46 @@ internal static class PbemReplayRuntime
             ResetReplayState();
             return false;
         }
+    }
+
+    private static void TryShowReplayPrompt(TurnManager p_turnManager, bool p_isReplayAgainPrompt)
+    {
+        if (p_turnManager == null || _isReplayPromptCoroutineRunning || _isReplayingFromSnapshot || _isApplyingAuthoritativeFinalState)
+        {
+            return;
+        }
+
+        if (!CanBootstrapReplayFromLocalSnapshot())
+        {
+            return;
+        }
+
+        _isReplayPromptCoroutineRunning = true;
+        p_turnManager.StartCoroutine(CR_ShowReplayPrompt(p_isReplayAgainPrompt));
+    }
+
+    private static IEnumerator CR_ShowReplayPrompt(bool p_isReplayAgainPrompt)
+    {
+        float timeout = 3f;
+        while (timeout > 0f && UIManager.instance == null)
+        {
+            timeout -= Time.unscaledDeltaTime;
+            yield return null;
+        }
+
+        _isReplayPromptCoroutineRunning = false;
+
+        if (UIManager.instance == null || _isReplayingFromSnapshot || _isApplyingAuthoritativeFinalState || !CanBootstrapReplayFromLocalSnapshot())
+        {
+            yield break;
+        }
+
+        string text = p_isReplayAgainPrompt ? "PBEM replay finished. Replay again?" : "PBEM replay available. Start replay?";
+        GameObject promptWindow = UIManager.ShowConfirmationWindow(text, delegate
+        {
+            TryBootstrapReplayFromLocalSnapshot();
+        });
+        TryConfigureReplayPromptButtons(promptWindow, p_isReplayAgainPrompt);
     }
 
     public static void TryStartReplayCoroutine(TurnManager p_turnManager)
@@ -472,6 +491,7 @@ internal static class PbemReplayRuntime
         _isReplayingFromSnapshot = false;
         _startedReplayCoroutine = false;
         _suppressScenarioIntroPanel = false;
+        _isReplayPromptCoroutineRunning = false;
         _pendingReplayActions = null;
         _authoritativeFinalSnapshotBytes = null;
         _authoritativeBatches = null;
@@ -479,6 +499,113 @@ internal static class PbemReplayRuntime
         if (!keepApplyAuthoritativeFlag)
         {
             _isApplyingAuthoritativeFinalState = false;
+        }
+    }
+
+    private static bool CanBootstrapReplayFromLocalSnapshot()
+    {
+        if (_isReplayingFromSnapshot || _isApplyingAuthoritativeFinalState)
+        {
+            return false;
+        }
+
+        return TryBuildReplayBootstrapData(GameData.Instance, out _, out _, out _);
+    }
+
+    private static bool ConsumeAuthoritativeFinalStateAppliedFlag()
+    {
+        if (!_isApplyingAuthoritativeFinalState)
+        {
+            return false;
+        }
+
+        _isApplyingAuthoritativeFinalState = false;
+        return true;
+    }
+
+    private static bool TryBuildReplayBootstrapData(GameData p_current, out List<ReplayTurnBatch> o_authoritativeBatches, out byte[] o_anchorSnapshotBytes, out List<ReplayRpcAction> o_pendingActions)
+    {
+        o_authoritativeBatches = null;
+        o_anchorSnapshotBytes = null;
+        o_pendingActions = null;
+
+        if (p_current == null || !p_current.isPBEM || p_current.sessionID == Guid.Empty)
+        {
+            return false;
+        }
+
+        if (!p_current.ModDataBag.TryGet(ReplayBatchesKey, out List<ReplayTurnBatch> authoritativeBatches) || authoritativeBatches == null || authoritativeBatches.Count == 0)
+        {
+            return false;
+        }
+
+        long anchorSequence = 0;
+        byte[] anchorSnapshotBytes = null;
+
+        if (TryLoadLocalSnapshotEnvelope(p_current.sessionID, out ReplaySnapshotEnvelope envelope) && envelope?.SnapshotBytes != null && envelope.SnapshotBytes.Length > 0)
+        {
+            anchorSequence = envelope.LastKnownSequence;
+            anchorSnapshotBytes = envelope.SnapshotBytes;
+        }
+        else if (p_current.ModDataBag.TryGet(ReplayBaselineSnapshotKey, out byte[] baselineBytes) && baselineBytes != null && baselineBytes.Length > 0)
+        {
+            anchorSequence = 0;
+            anchorSnapshotBytes = baselineBytes;
+        }
+        else
+        {
+            return false;
+        }
+
+        long maxSequence = authoritativeBatches.Max(b => b.Sequence);
+        if (maxSequence <= anchorSequence)
+        {
+            return false;
+        }
+
+        List<ReplayTurnBatch> pendingBatches = authoritativeBatches
+            .Where(b => b.Sequence > anchorSequence)
+            .OrderBy(b => b.Sequence)
+            .ToList();
+
+        List<ReplayRpcAction> pendingActions = pendingBatches
+            .SelectMany(b => b.Actions ?? new List<ReplayRpcAction>())
+            .Where(a => a != null && !string.IsNullOrEmpty(a.RpcName) && a.Payload != null)
+            .ToList();
+
+        if (pendingActions.Count == 0)
+        {
+            return false;
+        }
+
+        o_authoritativeBatches = authoritativeBatches;
+        o_anchorSnapshotBytes = anchorSnapshotBytes;
+        o_pendingActions = pendingActions;
+        return true;
+    }
+
+    private static void TryConfigureReplayPromptButtons(GameObject p_promptWindow, bool p_isReplayAgainPrompt)
+    {
+        if (p_promptWindow == null || !p_promptWindow.TryGetComponent<ConfirmationWindowGO>(out ConfirmationWindowGO confirmation))
+        {
+            return;
+        }
+
+        TrySetButtonLabel(confirmation.yes_button, p_isReplayAgainPrompt ? "Replay" : "Start");
+        TrySetButtonLabel(confirmation.no_button, p_isReplayAgainPrompt ? "Close" : "Skip");
+    }
+
+    private static void TrySetButtonLabel(Button p_button, string p_text)
+    {
+        if (p_button == null || string.IsNullOrEmpty(p_text))
+        {
+            return;
+        }
+
+        TextMeshProUGUI label = p_button.GetComponentInChildren<TextMeshProUGUI>(includeInactive: true);
+        if (label != null)
+        {
+            label.text = p_text;
         }
     }
 
@@ -562,14 +689,7 @@ internal static class PbemReplayTurnStartPatch
     [HarmonyPostfix]
     private static void Postfix(TurnManager __instance)
     {
-        PbemReplayRuntime.OnTurnSceneStarted();
-
-        if (PbemReplayRuntime.TryBootstrapReplayFromLocalSnapshot())
-        {
-            return;
-        }
-
-        PbemReplayRuntime.TryStartReplayCoroutine(__instance);
+        PbemReplayRuntime.HandleTurnStart(__instance);
     }
 }
 
