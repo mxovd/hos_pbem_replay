@@ -145,7 +145,66 @@ internal static class PbemReplayRuntime
 
     private static List<ReplayTurnBatch> _authoritativeBatches;
 
+    private static bool _didApplyReplayRuntimeOverrides;
+
+    private static bool _replayQuickMovementBackup;
+
+    private static bool _replayFollowAIMovesBackup;
+
+    private static float _replayTimeScaleBackup = 1f;
+
+    private static CameraGO _replayCameraBackupSource;
+
+    private static float _replayCameraZoomBackup = -1f;
+
+    private static float _replayCameraTargetZoomBackup = -1f;
+
+    private static bool _isRestoringAuthoritativeState;
+
+    private static bool _didResolveInputGetKeyDownMethod;
+
+    private static MethodInfo _inputGetKeyDownMethod;
+
     public static bool IsReplaying => _isReplayingFromSnapshot;
+
+    public static bool TryAbortReplayFromEscape()
+    {
+        if (!_isReplayingFromSnapshot || _isRestoringAuthoritativeState || !IsEscapePressedThisFrame())
+        {
+            return false;
+        }
+
+        RestoreAuthoritativeStateAndReload();
+        return true;
+    }
+
+    private static bool IsEscapePressedThisFrame()
+    {
+        if (!_didResolveInputGetKeyDownMethod)
+        {
+            _didResolveInputGetKeyDownMethod = true;
+            Type inputType = Type.GetType("UnityEngine.Input, UnityEngine.InputLegacyModule") ?? Type.GetType("UnityEngine.Input, UnityEngine");
+            if (inputType != null)
+            {
+                _inputGetKeyDownMethod = AccessTools.Method(inputType, "GetKeyDown", new[] { typeof(KeyCode) });
+            }
+        }
+
+        if (_inputGetKeyDownMethod == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            object result = _inputGetKeyDownMethod.Invoke(null, new object[] { KeyCode.Escape });
+            return result is bool pressed && pressed;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static float GetReplaySpeedSetting()
     {
@@ -180,6 +239,65 @@ internal static class PbemReplayRuntime
     private static string FormatReplaySpeedLabel(float p_speed)
     {
         return "Replay speed: " + p_speed.ToString("0.00") + "x";
+    }
+
+    private static void ApplyReplayRuntimeOverrides()
+    {
+        if (_didApplyReplayRuntimeOverrides)
+        {
+            return;
+        }
+
+        _didApplyReplayRuntimeOverrides = true;
+        _replayQuickMovementBackup = PlayerSettings.Instance.IsQuickMovement;
+        _replayFollowAIMovesBackup = PlayerSettings.Instance.FollowAIMoves;
+        _replayTimeScaleBackup = Time.timeScale;
+        _replayCameraBackupSource = CameraGO.instance;
+        _replayCameraZoomBackup = -1f;
+        _replayCameraTargetZoomBackup = -1f;
+
+        PlayerSettings.Instance.IsQuickMovement = false;
+        PlayerSettings.Instance.FollowAIMoves = true;
+        Time.timeScale = GetReplaySpeedSetting();
+
+        CameraGO cameraGo = _replayCameraBackupSource;
+        if (cameraGo != null && cameraGo.cam != null)
+        {
+            _replayCameraZoomBackup = cameraGo.cam.orthographicSize;
+            _replayCameraTargetZoomBackup = cameraGo.targetZoom;
+            float desiredReplayZoom = Mathf.Clamp(_replayCameraZoomBackup * ReplayZoomFactor, cameraGo.minZoom, Mathf.Min(cameraGo.maxZoom, ReplayZoomUpperBound));
+            desiredReplayZoom = Mathf.Min(desiredReplayZoom, _replayCameraZoomBackup);
+            cameraGo.targetZoom = desiredReplayZoom;
+            cameraGo.cam.orthographicSize = desiredReplayZoom;
+        }
+    }
+
+    private static void RestoreReplayRuntimeOverrides()
+    {
+        if (!_didApplyReplayRuntimeOverrides)
+        {
+            return;
+        }
+
+        _didApplyReplayRuntimeOverrides = false;
+        Time.timeScale = _replayTimeScaleBackup;
+
+        if (PlayerSettings.Instance != null)
+        {
+            PlayerSettings.Instance.IsQuickMovement = _replayQuickMovementBackup;
+            PlayerSettings.Instance.FollowAIMoves = _replayFollowAIMovesBackup;
+        }
+
+        CameraGO cameraGo = _replayCameraBackupSource != null ? _replayCameraBackupSource : CameraGO.instance;
+        if (cameraGo != null && cameraGo.cam != null && _replayCameraZoomBackup > 0f)
+        {
+            cameraGo.targetZoom = _replayCameraTargetZoomBackup > 0f ? _replayCameraTargetZoomBackup : _replayCameraZoomBackup;
+            cameraGo.cam.orthographicSize = _replayCameraZoomBackup;
+        }
+
+        _replayCameraBackupSource = null;
+        _replayCameraZoomBackup = -1f;
+        _replayCameraTargetZoomBackup = -1f;
     }
 
     public static bool TryHandleReplayCameraRecentering(Vector3 p_targetWorldPos, ref float p_duration, ref IEnumerator o_result)
@@ -651,6 +769,12 @@ internal static class PbemReplayRuntime
         try
         {
             _authoritativeFinalSnapshotBytes = Utils.ConvertObjectToByteArray(current);
+            if (_authoritativeFinalSnapshotBytes == null || _authoritativeFinalSnapshotBytes.Length == 0)
+            {
+                ResetReplayState();
+                return false;
+            }
+
             _authoritativeBatches = authoritativeBatches;
             _pendingReplayActions = pendingActions;
             _isReplayingFromSnapshot = true;
@@ -736,26 +860,7 @@ internal static class PbemReplayRuntime
     private static IEnumerator CR_PlayReplayThenRestoreAuthoritativeState()
     {
         UIManager.isUIOpen = true;
-
-        bool quickMovementBackup = PlayerSettings.Instance.IsQuickMovement;
-        bool followAIMovesBackup = PlayerSettings.Instance.FollowAIMoves;
-        float timeScaleBackup = Time.timeScale;
-        float cameraZoomBackup = -1f;
-        float cameraTargetZoomBackup = -1f;
-        PlayerSettings.Instance.IsQuickMovement = false;
-        PlayerSettings.Instance.FollowAIMoves = true;
-        Time.timeScale = GetReplaySpeedSetting();
-
-        CameraGO cameraGo = CameraGO.instance;
-        if (cameraGo != null && cameraGo.cam != null)
-        {
-            cameraZoomBackup = cameraGo.cam.orthographicSize;
-            cameraTargetZoomBackup = cameraGo.targetZoom;
-            float desiredReplayZoom = Mathf.Clamp(cameraZoomBackup * ReplayZoomFactor, cameraGo.minZoom, Mathf.Min(cameraGo.maxZoom, ReplayZoomUpperBound));
-            desiredReplayZoom = Mathf.Min(desiredReplayZoom, cameraZoomBackup);
-            cameraGo.targetZoom = desiredReplayZoom;
-            cameraGo.cam.orthographicSize = desiredReplayZoom;
-        }
+        ApplyReplayRuntimeOverrides();
 
         try
         {
@@ -790,38 +895,61 @@ internal static class PbemReplayRuntime
         }
         finally
         {
-            Time.timeScale = timeScaleBackup;
-            PlayerSettings.Instance.IsQuickMovement = quickMovementBackup;
-            PlayerSettings.Instance.FollowAIMoves = followAIMovesBackup;
-            if (cameraGo != null && cameraGo.cam != null && cameraZoomBackup > 0f)
-            {
-                cameraGo.targetZoom = cameraTargetZoomBackup > 0f ? cameraTargetZoomBackup : cameraZoomBackup;
-                cameraGo.cam.orthographicSize = cameraZoomBackup;
-            }
+            RestoreReplayRuntimeOverrides();
         }
 
         UIManager.ShowMessage("PBEM replay finished.");
+        RestoreAuthoritativeStateAndReload();
+    }
 
-        if (_authoritativeFinalSnapshotBytes != null && _authoritativeFinalSnapshotBytes.Length > 0)
+    private static bool TryApplyAuthoritativeFinalState()
+    {
+        if (_authoritativeFinalSnapshotBytes == null || _authoritativeFinalSnapshotBytes.Length == 0)
         {
-            try
-            {
-                GameData authoritative = (GameData)Utils.ConvertByteArrayToObject(_authoritativeFinalSnapshotBytes);
-                if (authoritative != null)
-                {
-                    authoritative.ModDataBag.TrySet(ReplayBatchesKey, _authoritativeBatches ?? new List<ReplayTurnBatch>(), preferKnownOverUnknown: true);
-                    GameData.Instance.SetData(authoritative);
-                    _isApplyingAuthoritativeFinalState = true;
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError("[pbem_replay] Could not restore authoritative PBEM state: " + ex.Message);
-            }
+            return false;
         }
 
-        ResetReplayState(keepApplyAuthoritativeFlag: true);
-        SceneManager.LoadScene("Game");
+        try
+        {
+            GameData authoritative = (GameData)Utils.ConvertByteArrayToObject(_authoritativeFinalSnapshotBytes);
+            if (authoritative == null)
+            {
+                return false;
+            }
+
+            authoritative.ModDataBag.TrySet(ReplayBatchesKey, _authoritativeBatches ?? new List<ReplayTurnBatch>(), preferKnownOverUnknown: true);
+            GameData.Instance.SetData(authoritative);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("[pbem_replay] Could not restore authoritative PBEM state: " + ex.Message);
+            return false;
+        }
+    }
+
+    private static void RestoreAuthoritativeStateAndReload()
+    {
+        if (_isRestoringAuthoritativeState)
+        {
+            return;
+        }
+
+        _isRestoringAuthoritativeState = true;
+        bool appliedAuthoritative = false;
+
+        try
+        {
+            RestoreReplayRuntimeOverrides();
+            appliedAuthoritative = TryApplyAuthoritativeFinalState();
+            _isApplyingAuthoritativeFinalState = appliedAuthoritative;
+            ResetReplayState(keepApplyAuthoritativeFlag: appliedAuthoritative);
+            SceneManager.LoadScene("Game");
+        }
+        finally
+        {
+            _isRestoringAuthoritativeState = false;
+        }
     }
 
     private static IEnumerator CR_WaitActionSettle(string p_rpcName)
@@ -871,6 +999,7 @@ internal static class PbemReplayRuntime
 
     private static void ResetReplayState(bool keepApplyAuthoritativeFlag = false)
     {
+        RestoreReplayRuntimeOverrides();
         _isReplayingFromSnapshot = false;
         _startedReplayCoroutine = false;
         _suppressScenarioIntroPanel = false;
@@ -885,6 +1014,8 @@ internal static class PbemReplayRuntime
         {
             _isApplyingAuthoritativeFinalState = false;
         }
+
+        _isRestoringAuthoritativeState = false;
     }
 
     private static bool CanBootstrapReplayFromLocalSnapshot()
@@ -1259,6 +1390,11 @@ internal static class PbemReplayCameraInputPatch
     private static void Prefix(out bool __state)
     {
         __state = false;
+        if (PbemReplayRuntime.TryAbortReplayFromEscape())
+        {
+            return;
+        }
+
         if (!PbemReplayRuntime.IsReplaying || !UIManager.isUIOpen)
         {
             return;
