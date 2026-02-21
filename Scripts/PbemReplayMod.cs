@@ -79,6 +79,8 @@ internal static class PbemReplayRuntime
 
     public const string ReplayBaselineSnapshotKey = "pbem_replay.baseline_snapshot.v1";
 
+    private const string ReplayPlayersWithLocalSnapshotKey = "pbem_replay.players_with_local_snapshot.v1";
+
     private static readonly HashSet<string> ReplayableRpcs = new HashSet<string>(StringComparer.Ordinal)
     {
         "RPC_MoveUnit",
@@ -707,6 +709,8 @@ internal static class PbemReplayRuntime
             };
 
             SaveLocalSnapshotEnvelope(envelope);
+            TrackCurrentPlayerLocalSnapshotReady(p_gameData);
+            TryPruneBaselineSnapshotIfAllHumanPlayersReady(p_gameData);
         }
         catch (Exception ex)
         {
@@ -717,6 +721,57 @@ internal static class PbemReplayRuntime
             PendingActionsForCurrentTurn.Clear();
             _currentTurnStartSnapshotBytes = null;
         }
+    }
+
+    private static void TrackCurrentPlayerLocalSnapshotReady(GameData p_gameData)
+    {
+        if (p_gameData == null || TurnManager.currPlayer == null || string.IsNullOrEmpty(TurnManager.currPlayer.Name))
+        {
+            return;
+        }
+
+        if (!p_gameData.ModDataBag.TryGet(ReplayPlayersWithLocalSnapshotKey, out List<string> readyPlayers) || readyPlayers == null)
+        {
+            readyPlayers = new List<string>();
+        }
+
+        if (readyPlayers.Contains(TurnManager.currPlayer.Name))
+        {
+            return;
+        }
+
+        readyPlayers.Add(TurnManager.currPlayer.Name);
+        p_gameData.ModDataBag.TrySet(ReplayPlayersWithLocalSnapshotKey, readyPlayers, preferKnownOverUnknown: true);
+    }
+
+    private static void TryPruneBaselineSnapshotIfAllHumanPlayersReady(GameData p_gameData)
+    {
+        if (p_gameData == null || p_gameData.listOfPlayers == null || p_gameData.listOfPlayers.Count == 0)
+        {
+            return;
+        }
+
+        if (!p_gameData.ModDataBag.TryGet(ReplayPlayersWithLocalSnapshotKey, out List<string> readyPlayers) || readyPlayers == null || readyPlayers.Count == 0)
+        {
+            return;
+        }
+
+        HashSet<string> readySet = new HashSet<string>(readyPlayers.Where(n => !string.IsNullOrEmpty(n)), StringComparer.Ordinal);
+        foreach (Player player in p_gameData.listOfPlayers)
+        {
+            if (player == null || player.IsComputer || string.IsNullOrEmpty(player.Name))
+            {
+                continue;
+            }
+
+            if (!readySet.Contains(player.Name))
+            {
+                return;
+            }
+        }
+
+        p_gameData.ModDataBag.Remove(ReplayBaselineSnapshotKey);
+        p_gameData.ModDataBag.Remove(ReplayPlayersWithLocalSnapshotKey);
     }
 
     public static void OnTurnSceneStarted()
