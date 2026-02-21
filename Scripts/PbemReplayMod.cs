@@ -121,6 +121,8 @@ internal static class PbemReplayRuntime
 
     private const float ReplayHiddenScale = 0.0001f;
 
+    private const int ReplayMaxBatchesToKeep = 3;
+
     private static byte[] _currentTurnStartSnapshotBytes;
 
     private static bool _isReplayingFromSnapshot;
@@ -692,10 +694,9 @@ internal static class PbemReplayRuntime
                 });
             }
 
-            const int maxBatchesToKeep = 256;
-            if (batches.Count > maxBatchesToKeep)
+            if (batches.Count > ReplayMaxBatchesToKeep)
             {
-                int toRemove = batches.Count - maxBatchesToKeep;
+                int toRemove = batches.Count - ReplayMaxBatchesToKeep;
                 batches.RemoveRange(0, toRemove);
             }
 
