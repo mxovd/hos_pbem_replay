@@ -103,7 +103,13 @@ internal static class PbemReplayRuntime
 
     private static readonly List<ReplayRpcAction> PendingActionsForCurrentTurn = new List<ReplayRpcAction>();
 
-    private const float ReplayTimeScale = 0.65f;
+    private const string ReplaySpeedPrefKey = "pbem_replay.speed.v1";
+
+    private const float ReplaySpeedDefault = 1f;
+
+    private const float ReplaySpeedMin = 1f;
+
+    private const float ReplaySpeedMax = 10f;
 
     private const float ReplayMoveSettleTimeoutSeconds = 20f;
 
@@ -119,6 +125,10 @@ internal static class PbemReplayRuntime
 
     private static bool _isReplayPromptCoroutineRunning;
 
+    private static bool _didLoadReplaySpeedSetting;
+
+    private static float _replaySpeedSetting = ReplaySpeedDefault;
+
     private static List<ReplayRpcAction> _pendingReplayActions;
 
     private static byte[] _authoritativeFinalSnapshotBytes;
@@ -132,6 +142,41 @@ internal static class PbemReplayRuntime
     public static IEnumerator GetEmptyCoroutine()
     {
         yield break;
+    }
+
+    private static float GetReplaySpeedSetting()
+    {
+        EnsureReplaySpeedSettingLoaded();
+        return _replaySpeedSetting;
+    }
+
+    private static void SetReplaySpeedSetting(float p_value)
+    {
+        EnsureReplaySpeedSettingLoaded();
+        _replaySpeedSetting = Mathf.Clamp(p_value, ReplaySpeedMin, ReplaySpeedMax);
+        PlayerPrefs.SetFloat(ReplaySpeedPrefKey, _replaySpeedSetting);
+    }
+
+    private static void EnsureReplaySpeedSettingLoaded()
+    {
+        if (_didLoadReplaySpeedSetting)
+        {
+            return;
+        }
+
+        _didLoadReplaySpeedSetting = true;
+        _replaySpeedSetting = Mathf.Clamp(PlayerPrefs.GetFloat(ReplaySpeedPrefKey, ReplaySpeedDefault), ReplaySpeedMin, ReplaySpeedMax);
+    }
+
+    private static string FormatReplaySpeedLabel(float p_speed)
+    {
+        return "Replay speed: " + p_speed.ToString("0.00") + "x";
+    }
+
+    private static float ScaleReplayPause(float p_seconds)
+    {
+        float speed = Mathf.Max(ReplaySpeedMin, GetReplaySpeedSetting());
+        return Mathf.Max(0.01f, p_seconds / speed);
     }
 
     public static void HandleTurnStart(TurnManager p_turnManager)
@@ -418,7 +463,7 @@ internal static class PbemReplayRuntime
         float timeScaleBackup = Time.timeScale;
         PlayerSettings.Instance.IsQuickMovement = false;
         PlayerSettings.Instance.FollowAIMoves = false;
-        Time.timeScale = ReplayTimeScale;
+        Time.timeScale = GetReplaySpeedSetting();
 
         try
         {
@@ -499,11 +544,11 @@ internal static class PbemReplayRuntime
                 yield return null;
             }
 
-            yield return new WaitForSecondsRealtime(0.25f);
+            yield return new WaitForSecondsRealtime(ScaleReplayPause(0.25f));
             yield break;
         }
 
-        yield return new WaitForSecondsRealtime(GetReplayActionPauseSeconds(p_rpcName));
+        yield return new WaitForSecondsRealtime(ScaleReplayPause(GetReplayActionPauseSeconds(p_rpcName)));
     }
 
     private static float GetReplayActionPauseSeconds(string p_rpcName)
@@ -634,6 +679,7 @@ internal static class PbemReplayRuntime
 
         TrySetButtonLabel(confirmation.yes_button, p_isReplayAgainPrompt ? "Replay" : "Start");
         TrySetButtonLabel(confirmation.no_button, p_isReplayAgainPrompt ? "Close" : "Skip");
+        TryAttachReplaySpeedSlider(p_promptWindow, confirmation);
     }
 
     private static void TrySetButtonLabel(Button p_button, string p_text)
@@ -648,6 +694,149 @@ internal static class PbemReplayRuntime
         {
             label.text = p_text;
         }
+    }
+
+    private static void TryAttachReplaySpeedSlider(GameObject p_promptWindow, ConfirmationWindowGO p_confirmation)
+    {
+        if (p_promptWindow == null || p_confirmation == null)
+        {
+            return;
+        }
+
+        if (p_promptWindow.transform.Find("pbem_replay_speed_root") != null)
+        {
+            return;
+        }
+
+        EnsureReplaySpeedSettingLoaded();
+
+        RectTransform parent = p_confirmation.description_text != null ? p_confirmation.description_text.rectTransform.parent as RectTransform : p_promptWindow.GetComponent<RectTransform>();
+        if (parent == null)
+        {
+            return;
+        }
+
+        GameObject root = new GameObject("pbem_replay_speed_root", typeof(RectTransform));
+        root.transform.SetParent(parent, worldPositionStays: false);
+        RectTransform rootRect = root.GetComponent<RectTransform>();
+        rootRect.anchorMin = new Vector2(0.12f, 0.22f);
+        rootRect.anchorMax = new Vector2(0.88f, 0.46f);
+        rootRect.offsetMin = Vector2.zero;
+        rootRect.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI label = CreateReplaySpeedLabel(root.transform, p_confirmation.description_text);
+        Slider slider = CreateReplaySpeedSlider(root.transform);
+        if (slider == null)
+        {
+            return;
+        }
+
+        slider.minValue = ReplaySpeedMin;
+        slider.maxValue = ReplaySpeedMax;
+        slider.wholeNumbers = false;
+        slider.SetValueWithoutNotify(_replaySpeedSetting);
+        if (label != null)
+        {
+            label.text = FormatReplaySpeedLabel(_replaySpeedSetting);
+        }
+
+        slider.onValueChanged.AddListener(delegate (float p_value)
+        {
+            SetReplaySpeedSetting(p_value);
+            if (label != null)
+            {
+                label.text = FormatReplaySpeedLabel(_replaySpeedSetting);
+            }
+        });
+    }
+
+    private static TextMeshProUGUI CreateReplaySpeedLabel(Transform p_parent, TextMeshProUGUI p_reference)
+    {
+        GameObject labelGo = new GameObject("ReplaySpeedLabel", typeof(RectTransform), typeof(TextMeshProUGUI));
+        labelGo.transform.SetParent(p_parent, worldPositionStays: false);
+
+        RectTransform labelRect = labelGo.GetComponent<RectTransform>();
+        labelRect.anchorMin = new Vector2(0f, 0.66f);
+        labelRect.anchorMax = new Vector2(1f, 1f);
+        labelRect.offsetMin = new Vector2(0f, 2f);
+        labelRect.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI label = labelGo.GetComponent<TextMeshProUGUI>();
+        label.alignment = TextAlignmentOptions.Center;
+        label.enableWordWrapping = false;
+        label.fontSize = p_reference != null ? Mathf.Max(18f, p_reference.fontSize * 0.7f) : 24f;
+        label.color = p_reference != null ? p_reference.color : Color.white;
+        if (p_reference != null)
+        {
+            label.font = p_reference.font;
+            label.fontSharedMaterial = p_reference.fontSharedMaterial;
+        }
+
+        return label;
+    }
+
+    private static Slider CreateReplaySpeedSlider(Transform p_parent)
+    {
+        GameObject sliderGo = new GameObject("ReplaySpeedSlider", typeof(RectTransform), typeof(Slider));
+        sliderGo.transform.SetParent(p_parent, worldPositionStays: false);
+
+        RectTransform sliderRect = sliderGo.GetComponent<RectTransform>();
+        sliderRect.anchorMin = new Vector2(0f, 0.04f);
+        sliderRect.anchorMax = new Vector2(1f, 0.42f);
+        sliderRect.offsetMin = Vector2.zero;
+        sliderRect.offsetMax = new Vector2(0f, -2f);
+
+        Slider slider = sliderGo.GetComponent<Slider>();
+        slider.direction = Slider.Direction.LeftToRight;
+
+        Image background = CreateSliderImage(sliderGo.transform, "Background", new Color(0f, 0f, 0f, 0.45f));
+        RectTransform backgroundRect = background.rectTransform;
+        backgroundRect.anchorMin = new Vector2(0f, 0.2f);
+        backgroundRect.anchorMax = new Vector2(1f, 0.8f);
+        backgroundRect.offsetMin = new Vector2(0f, 0f);
+        backgroundRect.offsetMax = new Vector2(0f, 0f);
+
+        GameObject fillAreaGo = new GameObject("Fill Area", typeof(RectTransform));
+        fillAreaGo.transform.SetParent(sliderGo.transform, worldPositionStays: false);
+        RectTransform fillAreaRect = fillAreaGo.GetComponent<RectTransform>();
+        fillAreaRect.anchorMin = new Vector2(0f, 0.2f);
+        fillAreaRect.anchorMax = new Vector2(1f, 0.8f);
+        fillAreaRect.offsetMin = new Vector2(8f, 0f);
+        fillAreaRect.offsetMax = new Vector2(-8f, 0f);
+
+        Image fill = CreateSliderImage(fillAreaGo.transform, "Fill", new Color(0.2f, 0.72f, 1f, 0.95f));
+        RectTransform fillRect = fill.rectTransform;
+        fillRect.anchorMin = new Vector2(0f, 0f);
+        fillRect.anchorMax = new Vector2(1f, 1f);
+        fillRect.offsetMin = Vector2.zero;
+        fillRect.offsetMax = Vector2.zero;
+
+        GameObject handleSlideAreaGo = new GameObject("Handle Slide Area", typeof(RectTransform));
+        handleSlideAreaGo.transform.SetParent(sliderGo.transform, worldPositionStays: false);
+        RectTransform handleSlideAreaRect = handleSlideAreaGo.GetComponent<RectTransform>();
+        handleSlideAreaRect.anchorMin = new Vector2(0f, 0f);
+        handleSlideAreaRect.anchorMax = new Vector2(1f, 1f);
+        handleSlideAreaRect.offsetMin = new Vector2(8f, 0f);
+        handleSlideAreaRect.offsetMax = new Vector2(-8f, 0f);
+
+        Image handle = CreateSliderImage(handleSlideAreaGo.transform, "Handle", new Color(1f, 1f, 1f, 0.95f));
+        RectTransform handleRect = handle.rectTransform;
+        handleRect.sizeDelta = new Vector2(16f, 28f);
+
+        slider.fillRect = fillRect;
+        slider.handleRect = handleRect;
+        slider.targetGraphic = handle;
+
+        return slider;
+    }
+
+    private static Image CreateSliderImage(Transform p_parent, string p_name, Color p_color)
+    {
+        GameObject imageGo = new GameObject(p_name, typeof(RectTransform), typeof(Image));
+        imageGo.transform.SetParent(p_parent, worldPositionStays: false);
+        Image image = imageGo.GetComponent<Image>();
+        image.color = p_color;
+        return image;
     }
 
     private static string GetSnapshotPath(Guid p_sessionId)
