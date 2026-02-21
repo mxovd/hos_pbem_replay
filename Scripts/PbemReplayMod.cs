@@ -171,15 +171,15 @@ internal static class PbemReplayRuntime
         _replaySpeedSetting = Mathf.Clamp(PlayerPrefs.GetFloat(ReplaySpeedPrefKey, ReplaySpeedDefault), ReplaySpeedMin, ReplaySpeedMax);
     }
 
-    private static string FormatReplaySpeedLabel(float p_speed)
-    {
-        return "Replay speed: " + p_speed.ToString("0.00") + "x";
-    }
-
     private static float ScaleReplayPause(float p_seconds)
     {
         float speed = Mathf.Max(ReplaySpeedMin, GetReplaySpeedSetting());
         return Mathf.Max(0.01f, p_seconds / speed);
+    }
+
+    private static string FormatReplaySpeedLabel(float p_speed)
+    {
+        return "Replay speed: " + p_speed.ToString("0.00") + "x";
     }
 
     public static bool TryHandleReplayCameraRecentering(Vector3 p_targetWorldPos, ref float p_duration, ref IEnumerator o_result)
@@ -736,7 +736,6 @@ internal static class PbemReplayRuntime
     private static IEnumerator CR_PlayReplayThenRestoreAuthoritativeState()
     {
         UIManager.isUIOpen = true;
-        UIManager.ShowMessage("PBEM replay: playing actions...");
 
         bool quickMovementBackup = PlayerSettings.Instance.IsQuickMovement;
         bool followAIMovesBackup = PlayerSettings.Instance.FollowAIMoves;
@@ -1019,8 +1018,8 @@ internal static class PbemReplayRuntime
         GameObject root = new GameObject("pbem_replay_speed_root", typeof(RectTransform));
         root.transform.SetParent(parent, worldPositionStays: false);
         RectTransform rootRect = root.GetComponent<RectTransform>();
-        rootRect.anchorMin = new Vector2(0.12f, 0.22f);
-        rootRect.anchorMax = new Vector2(0.88f, 0.46f);
+        rootRect.anchorMin = new Vector2(0.12f, 0.31f);
+        rootRect.anchorMax = new Vector2(0.88f, 0.45f);
         rootRect.offsetMin = Vector2.zero;
         rootRect.offsetMax = Vector2.zero;
 
@@ -1056,15 +1055,15 @@ internal static class PbemReplayRuntime
         labelGo.transform.SetParent(p_parent, worldPositionStays: false);
 
         RectTransform labelRect = labelGo.GetComponent<RectTransform>();
-        labelRect.anchorMin = new Vector2(0f, 0.66f);
+        labelRect.anchorMin = new Vector2(0f, 0.84f);
         labelRect.anchorMax = new Vector2(1f, 1f);
-        labelRect.offsetMin = new Vector2(0f, 2f);
+        labelRect.offsetMin = Vector2.zero;
         labelRect.offsetMax = Vector2.zero;
 
         TextMeshProUGUI label = labelGo.GetComponent<TextMeshProUGUI>();
         label.alignment = TextAlignmentOptions.Center;
         label.enableWordWrapping = false;
-        label.fontSize = p_reference != null ? Mathf.Max(18f, p_reference.fontSize * 0.7f) : 24f;
+        label.fontSize = p_reference != null ? Mathf.Max(15f, p_reference.fontSize * 0.52f) : 18f;
         label.color = p_reference != null ? p_reference.color : Color.white;
         if (p_reference != null)
         {
@@ -1081,10 +1080,10 @@ internal static class PbemReplayRuntime
         sliderGo.transform.SetParent(p_parent, worldPositionStays: false);
 
         RectTransform sliderRect = sliderGo.GetComponent<RectTransform>();
-        sliderRect.anchorMin = new Vector2(0f, 0.04f);
-        sliderRect.anchorMax = new Vector2(1f, 0.42f);
+        sliderRect.anchorMin = new Vector2(0f, 0.12f);
+        sliderRect.anchorMax = new Vector2(1f, 0.38f);
         sliderRect.offsetMin = Vector2.zero;
-        sliderRect.offsetMax = new Vector2(0f, -2f);
+        sliderRect.offsetMax = Vector2.zero;
 
         Slider slider = sliderGo.GetComponent<Slider>();
         slider.direction = Slider.Direction.LeftToRight;
