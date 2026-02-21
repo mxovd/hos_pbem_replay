@@ -1008,6 +1008,34 @@ internal static class PbemReplayUiStartPatch
     }
 }
 
+[HarmonyPatch(typeof(CameraGO), "Update")]
+internal static class PbemReplayCameraInputPatch
+{
+    [HarmonyPrefix]
+    private static void Prefix(out bool __state)
+    {
+        __state = false;
+        if (!PbemReplayRuntime.IsReplaying || !UIManager.isUIOpen)
+        {
+            return;
+        }
+
+        __state = true;
+        UIManager.isUIOpen = false;
+    }
+
+    [HarmonyPostfix]
+    private static void Postfix(bool __state)
+    {
+        if (!__state)
+        {
+            return;
+        }
+
+        UIManager.isUIOpen = true;
+    }
+}
+
 [HarmonyPatch(typeof(UIManager), "CenterCameraOnUnitCoroutine")]
 internal static class PbemReplayCameraRecenteringPatch
 {
