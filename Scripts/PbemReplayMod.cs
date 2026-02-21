@@ -103,6 +103,10 @@ internal static class PbemReplayRuntime
 
     private static readonly List<ReplayRpcAction> PendingActionsForCurrentTurn = new List<ReplayRpcAction>();
 
+    private const float ReplayTimeScale = 0.65f;
+
+    private const float ReplayMoveSettleTimeoutSeconds = 20f;
+
     private static byte[] _currentTurnStartSnapshotBytes;
 
     private static bool _isReplayingFromSnapshot;
@@ -122,6 +126,13 @@ internal static class PbemReplayRuntime
     private static List<ReplayTurnBatch> _authoritativeBatches;
 
     public static bool IsReplaying => _isReplayingFromSnapshot;
+
+    public static bool ShouldSuppressCameraRecentering() => _isReplayingFromSnapshot;
+
+    public static IEnumerator GetEmptyCoroutine()
+    {
+        yield break;
+    }
 
     public static void HandleTurnStart(TurnManager p_turnManager)
     {
@@ -404,40 +415,48 @@ internal static class PbemReplayRuntime
 
         bool quickMovementBackup = PlayerSettings.Instance.IsQuickMovement;
         bool followAIMovesBackup = PlayerSettings.Instance.FollowAIMoves;
+        float timeScaleBackup = Time.timeScale;
         PlayerSettings.Instance.IsQuickMovement = false;
-        PlayerSettings.Instance.FollowAIMoves = true;
+        PlayerSettings.Instance.FollowAIMoves = false;
+        Time.timeScale = ReplayTimeScale;
 
-        MultiplayerManager manager = MultiplayerManager.Instance;
-        if (manager != null)
+        try
         {
-            foreach (ReplayRpcAction action in _pendingReplayActions ?? new List<ReplayRpcAction>())
+            MultiplayerManager manager = MultiplayerManager.Instance;
+            if (manager != null)
             {
-                if (action?.Payload == null || string.IsNullOrEmpty(action.RpcName))
+                foreach (ReplayRpcAction action in _pendingReplayActions ?? new List<ReplayRpcAction>())
                 {
-                    continue;
-                }
+                    if (action?.Payload == null || string.IsNullOrEmpty(action.RpcName))
+                    {
+                        continue;
+                    }
 
-                MethodInfo method = AccessTools.Method(typeof(MultiplayerManager), action.RpcName, new[] { typeof(byte[]) });
-                if (method == null)
-                {
-                    continue;
-                }
+                    MethodInfo method = AccessTools.Method(typeof(MultiplayerManager), action.RpcName, new[] { typeof(byte[]) });
+                    if (method == null)
+                    {
+                        continue;
+                    }
 
-                try
-                {
-                    method.Invoke(manager, new object[] { action.Payload });
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError("[pbem_replay] Failed to replay action '" + action.RpcName + "': " + ex.Message);
-                }
+                    try
+                    {
+                        method.Invoke(manager, new object[] { action.Payload });
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError("[pbem_replay] Failed to replay action '" + action.RpcName + "': " + ex.Message);
+                    }
 
-                yield return CR_WaitActionSettle(action.RpcName);
+                    yield return CR_WaitActionSettle(action.RpcName);
+                }
             }
         }
-
-        PlayerSettings.Instance.IsQuickMovement = quickMovementBackup;
-        PlayerSettings.Instance.FollowAIMoves = followAIMovesBackup;
+        finally
+        {
+            Time.timeScale = timeScaleBackup;
+            PlayerSettings.Instance.IsQuickMovement = quickMovementBackup;
+            PlayerSettings.Instance.FollowAIMoves = followAIMovesBackup;
+        }
 
         UIManager.ShowMessage("PBEM replay finished.");
 
@@ -467,7 +486,7 @@ internal static class PbemReplayRuntime
     {
         if (p_rpcName == "RPC_MoveUnit")
         {
-            float timeout = 12f;
+            float timeout = ReplayMoveSettleTimeoutSeconds;
             while (timeout > 0f)
             {
                 UnitGO[] units = UnityEngine.Object.FindObjectsOfType<UnitGO>();
@@ -479,10 +498,32 @@ internal static class PbemReplayRuntime
                 timeout -= Time.unscaledDeltaTime;
                 yield return null;
             }
+
+            yield return new WaitForSecondsRealtime(0.25f);
+            yield break;
         }
-        else
+
+        yield return new WaitForSecondsRealtime(GetReplayActionPauseSeconds(p_rpcName));
+    }
+
+    private static float GetReplayActionPauseSeconds(string p_rpcName)
+    {
+        switch (p_rpcName)
         {
-            yield return new WaitForSeconds(0.1f);
+            case "RPC_AttackUnit":
+            case "RPC_KillUnit":
+                return 0.75f;
+            case "RPC_ShowDamage":
+            case "RPC_DisplayXP":
+            case "RPC_DisplayFuelLoss":
+            case "RPC_DisplayAmmoLoss":
+                return 0.4f;
+            case "RPC_PlaySound":
+                return 0.05f;
+            case "RPC_SyncTile":
+                return 0.12f;
+            default:
+                return 0.3f;
         }
     }
 
@@ -710,5 +751,21 @@ internal static class PbemReplayUiStartPatch
     private static void Postfix()
     {
         PbemReplayRuntime.TryHideScenarioIntroPanel(MapGO.instance);
+    }
+}
+
+[HarmonyPatch(typeof(UIManager), "CenterCameraOnUnitCoroutine")]
+internal static class PbemReplaySuppressCameraRecenteringPatch
+{
+    [HarmonyPrefix]
+    private static bool Prefix(ref IEnumerator __result)
+    {
+        if (!PbemReplayRuntime.ShouldSuppressCameraRecentering())
+        {
+            return true;
+        }
+
+        __result = PbemReplayRuntime.GetEmptyCoroutine();
+        return false;
     }
 }
