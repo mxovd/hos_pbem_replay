@@ -167,6 +167,10 @@ internal static class PbemReplayRuntime
 
     private static bool _isRestoringAuthoritativeState;
 
+    private static string _replayViewerPlayerName;
+
+    private static bool _didApplyReplayViewerPerspective;
+
     private static bool _didResolveInputGetKeyDownMethod;
 
     private static MethodInfo _inputGetKeyDownMethod;
@@ -176,6 +180,132 @@ internal static class PbemReplayRuntime
     private static bool ShouldSuppressReplayBootstrapPanels()
     {
         return _isReplayingFromSnapshot || _suppressScenarioIntroPanel;
+    }
+
+    private static string ResolveReplayViewerPlayerName(GameData p_gameData)
+    {
+        if (p_gameData == null)
+        {
+            return string.Empty;
+        }
+
+        if (p_gameData.TryFindLocalPlayer(out Player localPlayer) && localPlayer != null && !string.IsNullOrEmpty(localPlayer.Name))
+        {
+            return localPlayer.Name;
+        }
+
+        if (TurnManager.humanPlayer != null && !string.IsNullOrEmpty(TurnManager.humanPlayer.Name) && p_gameData.TryFindPlayerByName(TurnManager.humanPlayer.Name, out _))
+        {
+            return TurnManager.humanPlayer.Name;
+        }
+
+        if (TurnManager.currPlayer != null && !string.IsNullOrEmpty(TurnManager.currPlayer.Name) && p_gameData.TryFindPlayerByName(TurnManager.currPlayer.Name, out _))
+        {
+            return TurnManager.currPlayer.Name;
+        }
+
+        return string.Empty;
+    }
+
+    private static bool TryGetReplayViewerPlayer(out Player o_viewer)
+    {
+        o_viewer = null;
+        GameData current = GameData.Instance;
+        if (current == null)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(_replayViewerPlayerName) && current.TryFindPlayerByName(_replayViewerPlayerName, out Player namedViewer) && namedViewer != null)
+        {
+            o_viewer = namedViewer;
+            return true;
+        }
+
+        if (current.TryFindLocalPlayer(out Player localViewer) && localViewer != null)
+        {
+            o_viewer = localViewer;
+            return true;
+        }
+
+        if (TurnManager.humanPlayer != null)
+        {
+            o_viewer = TurnManager.humanPlayer;
+            return true;
+        }
+
+        if (TurnManager.currPlayer != null)
+        {
+            o_viewer = TurnManager.currPlayer;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static void RebuildReplayFogForViewer()
+    {
+        if (GameData.Instance?.map == null)
+        {
+            return;
+        }
+
+        MapGO.PlaceFogOfWarEverywhere();
+        MapGO.RemoveFogOfWarAroundVictoryPoint();
+        MapGO.RemoveBordersFOW();
+        MapGO.RemoveFogOfWarAroundUnits();
+
+        if (MainMenu.isLoadedGame)
+        {
+            MapGO.RemovePlayerSavedFOW();
+        }
+
+        if (MapGO.instance != null)
+        {
+            MapGO.instance.DrawBordersOnMap();
+        }
+    }
+
+    private static void EnsureReplayViewerPerspective()
+    {
+        if (!_isReplayingFromSnapshot || _didApplyReplayViewerPerspective)
+        {
+            return;
+        }
+
+        if (!TryGetReplayViewerPlayer(out Player viewer) || viewer == null)
+        {
+            return;
+        }
+
+        TurnManager.currPlayer = viewer;
+        TurnManager.humanPlayer = viewer;
+        _didApplyReplayViewerPerspective = true;
+
+        try
+        {
+            RebuildReplayFogForViewer();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("[pbem_replay] Failed to rebuild fog for replay viewer: " + ex.Message);
+        }
+    }
+
+    public static void TryPrepareReplayViewerPerspectiveForTurnStart()
+    {
+        if (!_isReplayingFromSnapshot)
+        {
+            return;
+        }
+
+        if (!TryGetReplayViewerPlayer(out Player viewer) || viewer == null)
+        {
+            return;
+        }
+
+        TurnManager.currPlayer = viewer;
+        TurnManager.humanPlayer = viewer;
     }
 
     public static bool TrySuppressReplayBootstrapPanels(UIManager p_uiManager, TurnManager p_turnManager)
@@ -416,7 +546,13 @@ internal static class PbemReplayRuntime
                 return;
             }
 
-            Player viewer = TurnManager.humanPlayer ?? TurnManager.currPlayer;
+            EnsureReplayViewerPerspective();
+
+            if (!TryGetReplayViewerPlayer(out Player viewer))
+            {
+                return;
+            }
+
             if (viewer == null || GameData.Instance?.map == null)
             {
                 return;
@@ -635,6 +771,7 @@ internal static class PbemReplayRuntime
 
         if (_isReplayingFromSnapshot)
         {
+            EnsureReplayViewerPerspective();
             TryStartReplayCoroutine(p_turnManager);
             return;
         }
@@ -898,6 +1035,8 @@ internal static class PbemReplayRuntime
             _isReplayingFromSnapshot = true;
             _startedReplayCoroutine = false;
             _suppressScenarioIntroPanel = true;
+            _replayViewerPlayerName = ResolveReplayViewerPlayerName(current);
+            _didApplyReplayViewerPerspective = false;
 
             GameData snapshotData = (GameData)Utils.ConvertByteArrayToObject(anchorSnapshotBytes);
             if (snapshotData == null)
@@ -979,6 +1118,7 @@ internal static class PbemReplayRuntime
     private static IEnumerator CR_PlayReplayThenRestoreAuthoritativeState()
     {
         UIManager.isUIOpen = true;
+        EnsureReplayViewerPerspective();
         ApplyReplayRuntimeOverrides();
 
         try
@@ -1129,6 +1269,8 @@ internal static class PbemReplayRuntime
         _pendingReplayActions = null;
         _authoritativeFinalSnapshotBytes = null;
         _authoritativeBatches = null;
+        _replayViewerPlayerName = string.Empty;
+        _didApplyReplayViewerPerspective = false;
 
         if (!keepApplyAuthoritativeFlag)
         {
@@ -1476,6 +1618,12 @@ internal static class PbemReplayEndTurnPatch
 [HarmonyPatch(typeof(TurnManager), "Start")]
 internal static class PbemReplayTurnStartPatch
 {
+    [HarmonyPrefix]
+    private static void Prefix()
+    {
+        PbemReplayRuntime.TryPrepareReplayViewerPerspectiveForTurnStart();
+    }
+
     [HarmonyPostfix]
     private static void Postfix(TurnManager __instance)
     {
