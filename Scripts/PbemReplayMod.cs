@@ -173,6 +173,51 @@ internal static class PbemReplayRuntime
 
     public static bool IsReplaying => _isReplayingFromSnapshot;
 
+    private static bool ShouldSuppressReplayBootstrapPanels()
+    {
+        return _isReplayingFromSnapshot || _suppressScenarioIntroPanel;
+    }
+
+    public static bool TrySuppressReplayBootstrapPanels(UIManager p_uiManager, TurnManager p_turnManager)
+    {
+        if (!ShouldSuppressReplayBootstrapPanels())
+        {
+            return false;
+        }
+
+        TryHideScenarioIntroPanel(MapGO.instance);
+
+        try
+        {
+            if (p_uiManager != null && p_uiManager.previousTurnSummary_panel != null)
+            {
+                p_uiManager.previousTurnSummary_panel.SetActive(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("[pbem_replay] Failed to suppress previous-turn summary panel: " + ex.Message);
+        }
+
+        try
+        {
+            if (p_turnManager != null && p_turnManager.endTurn_Panel != null)
+            {
+                p_turnManager.endTurn_Panel.SetActive(false);
+                if (GameData.Instance != null)
+                {
+                    GameData.Instance.endOfTurnPanelOpen = false;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("[pbem_replay] Failed to suppress end-turn panel: " + ex.Message);
+        }
+
+        return true;
+    }
+
     public static bool TryAbortReplayFromEscape()
     {
         if (!_isReplayingFromSnapshot || _isRestoringAuthoritativeState || !IsEscapePressedThisFrame())
@@ -586,6 +631,7 @@ internal static class PbemReplayRuntime
     public static void HandleTurnStart(TurnManager p_turnManager)
     {
         OnTurnSceneStarted();
+        TrySuppressReplayBootstrapPanels(UIManager.instance, p_turnManager);
 
         if (_isReplayingFromSnapshot)
         {
@@ -604,7 +650,7 @@ internal static class PbemReplayRuntime
 
     public static void TryHideScenarioIntroPanel(MapGO p_mapGo)
     {
-        if (!_suppressScenarioIntroPanel || p_mapGo == null || p_mapGo.startScenario_Panel == null)
+        if (!ShouldSuppressReplayBootstrapPanels() || p_mapGo == null || p_mapGo.startScenario_Panel == null)
         {
             return;
         }
@@ -1454,6 +1500,27 @@ internal static class PbemReplayUiStartPatch
     private static void Postfix()
     {
         PbemReplayRuntime.TryHideScenarioIntroPanel(MapGO.instance);
+        PbemReplayRuntime.TrySuppressReplayBootstrapPanels(UIManager.instance, TurnManager.instance);
+    }
+}
+
+[HarmonyPatch(typeof(UIManager), "ShowPreviousTurnSummary")]
+internal static class PbemReplayPreviousTurnSummaryPatch
+{
+    [HarmonyPrefix]
+    private static bool Prefix(UIManager __instance)
+    {
+        return !PbemReplayRuntime.TrySuppressReplayBootstrapPanels(__instance, TurnManager.instance);
+    }
+}
+
+[HarmonyPatch(typeof(TurnManager), "ShowHumanEndTurnPanel")]
+internal static class PbemReplayEndTurnPanelPatch
+{
+    [HarmonyPrefix]
+    private static bool Prefix(TurnManager __instance)
+    {
+        return !PbemReplayRuntime.TrySuppressReplayBootstrapPanels(UIManager.instance, __instance);
     }
 }
 
