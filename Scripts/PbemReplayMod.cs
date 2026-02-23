@@ -121,7 +121,9 @@ internal static class PbemReplayRuntime
 
     private const float ReplayHiddenScale = 0.0001f;
 
-    private const int ReplayMaxBatchesToKeep = 3;
+    private const int ReplayMinBatchesToKeep = 3;
+
+    private const int ReplayMaxBatchesCap = 8;
 
     private static byte[] _currentTurnStartSnapshotBytes;
 
@@ -694,9 +696,10 @@ internal static class PbemReplayRuntime
                 });
             }
 
-            if (batches.Count > ReplayMaxBatchesToKeep)
+            int maxBatchesToKeep = ResolveReplayMaxBatchesToKeep(p_gameData);
+            if (batches.Count > maxBatchesToKeep)
             {
-                int toRemove = batches.Count - ReplayMaxBatchesToKeep;
+                int toRemove = batches.Count - maxBatchesToKeep;
                 batches.RemoveRange(0, toRemove);
             }
 
@@ -773,6 +776,19 @@ internal static class PbemReplayRuntime
 
         p_gameData.ModDataBag.Remove(ReplayBaselineSnapshotKey);
         p_gameData.ModDataBag.Remove(ReplayPlayersWithLocalSnapshotKey);
+    }
+
+    private static int ResolveReplayMaxBatchesToKeep(GameData p_gameData)
+    {
+        if (p_gameData?.listOfPlayers == null || p_gameData.listOfPlayers.Count == 0)
+        {
+            return ReplayMinBatchesToKeep;
+        }
+
+        int humanPlayers = p_gameData.listOfPlayers.Count(p => p != null && !p.IsComputer);
+        int perRoundOpponentTurns = Math.Max(1, humanPlayers - 1);
+
+        return Math.Max(ReplayMinBatchesToKeep, Math.Min(ReplayMaxBatchesCap, perRoundOpponentTurns));
     }
 
     public static void OnTurnSceneStarted()
