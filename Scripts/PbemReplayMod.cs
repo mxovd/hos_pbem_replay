@@ -867,6 +867,7 @@ internal static class PbemReplayRuntime
             }
             GameData.Instance.SetData(snapshotData);
 
+            MainMenu.isLoadedGame = true;
             SceneManager.LoadScene("Game");
             return true;
         }
@@ -1016,6 +1017,7 @@ internal static class PbemReplayRuntime
             appliedAuthoritative = TryApplyAuthoritativeFinalState();
             _isApplyingAuthoritativeFinalState = appliedAuthoritative;
             ResetReplayState(keepApplyAuthoritativeFlag: appliedAuthoritative);
+            MainMenu.isLoadedGame = true;
             SceneManager.LoadScene("Game");
         }
         finally
