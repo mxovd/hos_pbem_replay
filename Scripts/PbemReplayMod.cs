@@ -1148,7 +1148,7 @@ internal static class PbemReplayRuntime
                         Debug.LogError("[pbem_replay] Failed to replay action '" + action.RpcName + "': " + ex.Message);
                     }
 
-                    yield return CR_WaitActionSettle(action.RpcName);
+                    yield return CR_WaitActionSettle(action);
                 }
             }
         }
@@ -1212,28 +1212,102 @@ internal static class PbemReplayRuntime
         }
     }
 
-    private static IEnumerator CR_WaitActionSettle(string p_rpcName)
+    private static bool IsCoordinateWithinMap(Tile.Coordinates p_coords, Map p_map)
     {
-        if (p_rpcName == "RPC_MoveUnit")
+        return p_map != null && p_coords.X >= 0 && p_coords.Y >= 0 && p_coords.X < p_map.SizeX && p_coords.Y < p_map.SizeY;
+    }
+
+    private static float EstimateMoveReplayDurationSeconds(byte[] p_payload)
+    {
+        if (p_payload == null || p_payload.Length == 0 || GameData.Instance?.map == null)
         {
-            float timeout = ReplayMoveSettleTimeoutSeconds;
+            return 0f;
+        }
+
+        try
+        {
+            object[] payload = (object[])Utils.ConvertByteArrayToObject(p_payload);
+            if (payload == null || payload.Length < 2 || !(payload[1] is List<Tile.Coordinates> pathCoords) || pathCoords.Count < 2)
+            {
+                return 0f;
+            }
+
+            Map map = GameData.Instance.map;
+            Tile[,] tiles = map.TilesTable;
+            float totalDistance = 0f;
+            for (int i = 1; i < pathCoords.Count; i++)
+            {
+                Tile.Coordinates prev = pathCoords[i - 1];
+                Tile.Coordinates next = pathCoords[i];
+                if (!IsCoordinateWithinMap(prev, map) || !IsCoordinateWithinMap(next, map))
+                {
+                    totalDistance += MapGO.DISTANCE_BETWEEN_TWO_TILES;
+                    continue;
+                }
+
+                Tile prevTile = tiles[prev.X, prev.Y];
+                Tile nextTile = tiles[next.X, next.Y];
+                if (prevTile?.tileGO == null || nextTile?.tileGO == null)
+                {
+                    totalDistance += MapGO.DISTANCE_BETWEEN_TWO_TILES;
+                    continue;
+                }
+
+                totalDistance += Vector3.Distance(prevTile.tileGO.transform.position, nextTile.tileGO.transform.position);
+            }
+
+            if (totalDistance <= Mathf.Epsilon)
+            {
+                return 0f;
+            }
+
+            // MultiplayerManager CR_MoveUnitToTile lerps with speed factor 25f / segmentDistance.
+            float baseDuration = totalDistance / 25f;
+            return Mathf.Clamp(baseDuration, 0.08f, 45f);
+        }
+        catch
+        {
+            return 0f;
+        }
+    }
+
+    private static IEnumerator CR_WaitActionSettle(ReplayRpcAction p_action)
+    {
+        string rpcName = p_action != null ? p_action.RpcName : string.Empty;
+        if (rpcName == "RPC_MoveUnit")
+        {
+            float estimatedMoveDuration = EstimateMoveReplayDurationSeconds(p_action?.Payload);
+            float timeout = Mathf.Max(ReplayMoveSettleTimeoutSeconds, estimatedMoveDuration + 2f);
+            bool observedAnyMovingUnit = false;
             while (timeout > 0f)
             {
                 UnitGO[] units = UnityEngine.Object.FindObjectsOfType<UnitGO>();
-                if (units == null || !units.Any(u => u != null && u.isMoving))
+                bool anyMovingUnit = units != null && units.Any(u => u != null && u.isMoving);
+                if (!anyMovingUnit)
                 {
                     break;
                 }
 
+                observedAnyMovingUnit = true;
                 timeout -= Time.unscaledDeltaTime;
                 yield return null;
             }
 
-            yield return new WaitForSecondsRealtime(ScaleReplayPause(0.25f));
+            float pauseSeconds;
+            if (observedAnyMovingUnit)
+            {
+                pauseSeconds = estimatedMoveDuration > 0f ? Mathf.Max(0.1f, estimatedMoveDuration * 0.15f) : 0.25f;
+            }
+            else
+            {
+                pauseSeconds = estimatedMoveDuration > 0f ? estimatedMoveDuration : 0.25f;
+            }
+
+            yield return new WaitForSecondsRealtime(ScaleReplayPause(pauseSeconds));
             yield break;
         }
 
-        yield return new WaitForSecondsRealtime(ScaleReplayPause(GetReplayActionPauseSeconds(p_rpcName)));
+        yield return new WaitForSecondsRealtime(ScaleReplayPause(GetReplayActionPauseSeconds(rpcName)));
     }
 
     private static float GetReplayActionPauseSeconds(string p_rpcName)
