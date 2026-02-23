@@ -131,6 +131,8 @@ internal static class PbemReplayRuntime
 
     private const int ReplayMaxBatchesCap = 8;
 
+    private const float ReplayFinalFrameHoldSeconds = 2.5f;
+
     private static byte[] _currentTurnStartSnapshotBytes;
 
     private static bool _isReplayingFromSnapshot;
@@ -176,6 +178,8 @@ internal static class PbemReplayRuntime
     private static string _replayViewerPlayerName;
 
     private static bool _didApplyReplayViewerPerspective;
+
+    private static bool _isHoldingReplayFinalFrame;
 
     private static bool _didResolveInputGetKeyDownMethod;
 
@@ -589,6 +593,12 @@ internal static class PbemReplayRuntime
 
     public static bool TryHandleReplayCameraRecentering(Vector3 p_targetWorldPos, ref float p_duration, ref IEnumerator o_result)
     {
+        if (_isHoldingReplayFinalFrame)
+        {
+            o_result = CR_Empty();
+            return true;
+        }
+
         if (!_isReplayingFromSnapshot)
         {
             return false;
@@ -1232,48 +1242,43 @@ internal static class PbemReplayRuntime
         EnsureReplayViewerPerspective();
         ApplyReplayRuntimeOverrides();
 
-        try
+        MultiplayerManager manager = MultiplayerManager.Instance;
+        if (manager != null)
         {
-            MultiplayerManager manager = MultiplayerManager.Instance;
-            if (manager != null)
+            foreach (ReplayRpcAction action in _pendingReplayActions ?? new List<ReplayRpcAction>())
             {
-                foreach (ReplayRpcAction action in _pendingReplayActions ?? new List<ReplayRpcAction>())
+                if (action?.Payload == null || string.IsNullOrEmpty(action.RpcName))
                 {
-                    if (action?.Payload == null || string.IsNullOrEmpty(action.RpcName))
-                    {
-                        continue;
-                    }
-
-                    MethodInfo method = AccessTools.Method(typeof(MultiplayerManager), action.RpcName, new[] { typeof(byte[]) });
-                    if (method == null)
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        method.Invoke(manager, new object[] { action.Payload });
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogError("[pbem_replay] Failed to replay action '" + action.RpcName + "': " + ex.Message);
-                    }
-
-                    if (ShouldRefreshFogAfterReplayAction(action))
-                    {
-                        RebuildReplayFogForViewer();
-                    }
-
-                    yield return CR_WaitActionSettle(action);
+                    continue;
                 }
+
+                MethodInfo method = AccessTools.Method(typeof(MultiplayerManager), action.RpcName, new[] { typeof(byte[]) });
+                if (method == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    method.Invoke(manager, new object[] { action.Payload });
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[pbem_replay] Failed to replay action '" + action.RpcName + "': " + ex.Message);
+                }
+
+                if (ShouldRefreshFogAfterReplayAction(action))
+                {
+                    RebuildReplayFogForViewer();
+                }
+
+                yield return CR_WaitActionSettle(action);
             }
         }
-        finally
-        {
-            RestoreReplayRuntimeOverrides();
-        }
 
+        _isHoldingReplayFinalFrame = true;
         UIManager.ShowMessage("PBEM replay finished.");
+        yield return new WaitForSecondsRealtime(ReplayFinalFrameHoldSeconds);
         RestoreAuthoritativeStateAndReload();
     }
 
@@ -1461,6 +1466,7 @@ internal static class PbemReplayRuntime
         _authoritativeBatches = null;
         _replayViewerPlayerName = string.Empty;
         _didApplyReplayViewerPerspective = false;
+        _isHoldingReplayFinalFrame = false;
 
         if (!keepApplyAuthoritativeFlag)
         {
