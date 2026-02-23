@@ -119,9 +119,11 @@ internal static class PbemReplayRuntime
 
     private const float ReplayMoveSettleTimeoutSeconds = 20f;
 
-    private const float ReplayZoomFactor = 0.55f;
+    private const float ReplayZoomFactor = 0.7f;
 
-    private const float ReplayZoomUpperBound = 28f;
+    private const float ReplayFramingCoverageFactor = 0.24f;
+
+    private const float ReplayFramingFallbackZoom = 18f;
 
     private const float ReplayHiddenScale = 0.0001f;
 
@@ -500,6 +502,31 @@ internal static class PbemReplayRuntime
         return "Replay speed: " + p_speed.ToString("0.00") + "x";
     }
 
+    private static float ResolveReplayFramingZoom(CameraGO p_cameraGo)
+    {
+        if (p_cameraGo == null || p_cameraGo.cam == null)
+        {
+            return ReplayFramingFallbackZoom;
+        }
+
+        float minZoom = p_cameraGo.minZoom;
+        float maxZoom = p_cameraGo.maxZoom;
+        float fallback = Mathf.Clamp(ReplayFramingFallbackZoom, minZoom, maxZoom);
+        if (GameData.Instance?.map == null)
+        {
+            return fallback;
+        }
+
+        float aspect = Mathf.Max(0.01f, p_cameraGo.cam.aspect);
+        float worldWidth = Mathf.Max(1f, GameData.Instance.map.SizeX * 5.2f);
+        float worldHeight = Mathf.Max(1f, GameData.Instance.map.SizeY * 5.2f);
+
+        float widthBased = (worldWidth / (2f * aspect)) * ReplayFramingCoverageFactor;
+        float heightBased = (worldHeight / 2f) * ReplayFramingCoverageFactor;
+        float framingZoom = Mathf.Max(widthBased, heightBased);
+        return Mathf.Clamp(framingZoom, minZoom, maxZoom);
+    }
+
     private static void ApplyReplayRuntimeOverrides()
     {
         if (_didApplyReplayRuntimeOverrides)
@@ -524,8 +551,9 @@ internal static class PbemReplayRuntime
         {
             _replayCameraZoomBackup = cameraGo.cam.orthographicSize;
             _replayCameraTargetZoomBackup = cameraGo.targetZoom;
-            float desiredReplayZoom = Mathf.Clamp(_replayCameraZoomBackup * ReplayZoomFactor, cameraGo.minZoom, Mathf.Min(cameraGo.maxZoom, ReplayZoomUpperBound));
-            desiredReplayZoom = Mathf.Min(desiredReplayZoom, _replayCameraZoomBackup);
+            float framingZoom = ResolveReplayFramingZoom(cameraGo);
+            float scaledBackupZoom = _replayCameraZoomBackup > 0f ? _replayCameraZoomBackup * ReplayZoomFactor : framingZoom;
+            float desiredReplayZoom = Mathf.Clamp(Mathf.Max(scaledBackupZoom, framingZoom), cameraGo.minZoom, cameraGo.maxZoom);
             cameraGo.targetZoom = desiredReplayZoom;
             cameraGo.cam.orthographicSize = desiredReplayZoom;
         }
