@@ -100,7 +100,11 @@ internal static class PbemReplayRuntime
         "RPC_DisplayAmmoLoss",
         "RPC_PlaySound",
         "RPC_SyncTile",
-        "RPC_SwapUnits"
+        "RPC_SwapUnits",
+        "RPC_WarDeclaration",
+        "RPC_AllianceMade",
+        "RPC_SignedPeace",
+        "RPC_SyncPlayerData"
     };
 
     private static readonly List<ReplayRpcAction> PendingActionsForCurrentTurn = new List<ReplayRpcAction>();
@@ -180,6 +184,80 @@ internal static class PbemReplayRuntime
     private static bool ShouldSuppressReplayBootstrapPanels()
     {
         return _isReplayingFromSnapshot || _suppressScenarioIntroPanel;
+    }
+
+    private static bool TryParseSyncAction(object p_value, out MultiplayerManager.SyncActions o_syncAction)
+    {
+        o_syncAction = default;
+        if (p_value is MultiplayerManager.SyncActions typed)
+        {
+            o_syncAction = typed;
+            return true;
+        }
+
+        if (p_value is int boxedInt && Enum.IsDefined(typeof(MultiplayerManager.SyncActions), boxedInt))
+        {
+            o_syncAction = (MultiplayerManager.SyncActions)boxedInt;
+            return true;
+        }
+
+        if (p_value is string text && Enum.TryParse(text, ignoreCase: true, out MultiplayerManager.SyncActions parsed))
+        {
+            o_syncAction = parsed;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool ShouldCaptureSyncPlayerDataArgs(object[] p_args)
+    {
+        if (p_args == null || p_args.Length < 2 || !TryParseSyncAction(p_args[1], out MultiplayerManager.SyncActions syncAction))
+        {
+            return false;
+        }
+
+        return syncAction == MultiplayerManager.SyncActions.PLAYER_DIPLOMACY
+            || syncAction == MultiplayerManager.SyncActions.PLAYER_FACTION_CHANGE;
+    }
+
+    private static bool ShouldRefreshFogAfterReplayAction(ReplayRpcAction p_action)
+    {
+        if (p_action == null || string.IsNullOrEmpty(p_action.RpcName))
+        {
+            return false;
+        }
+
+        switch (p_action.RpcName)
+        {
+            case "RPC_WarDeclaration":
+            case "RPC_AllianceMade":
+            case "RPC_SignedPeace":
+                return true;
+            case "RPC_SyncPlayerData":
+                try
+                {
+                    if (p_action.Payload == null || p_action.Payload.Length == 0)
+                    {
+                        return false;
+                    }
+
+                    object[] payload = (object[])Utils.ConvertByteArrayToObject(p_action.Payload);
+                    if (payload == null || payload.Length < 2 || !TryParseSyncAction(payload[1], out MultiplayerManager.SyncActions syncAction))
+                    {
+                        return false;
+                    }
+
+                    return syncAction == MultiplayerManager.SyncActions.PLAYER_DIPLOMACY
+                        || syncAction == MultiplayerManager.SyncActions.PLAYER_FACTION_CHANGE;
+                }
+                catch
+                {
+                    return false;
+                }
+            default:
+                return false;
+        }
     }
 
     private static string ResolveReplayViewerPlayerName(GameData p_gameData)
@@ -826,6 +904,11 @@ internal static class PbemReplayRuntime
                 return;
             }
 
+            if (p_rpcName == "RPC_SyncPlayerData" && !ShouldCaptureSyncPlayerDataArgs(p_args))
+            {
+                return;
+            }
+
             byte[] payload = Utils.ConvertObjectToByteArray(p_args ?? Array.Empty<object>());
             if (payload == null || payload.Length == 0)
             {
@@ -1146,6 +1229,11 @@ internal static class PbemReplayRuntime
                     catch (Exception ex)
                     {
                         Debug.LogError("[pbem_replay] Failed to replay action '" + action.RpcName + "': " + ex.Message);
+                    }
+
+                    if (ShouldRefreshFogAfterReplayAction(action))
+                    {
+                        RebuildReplayFogForViewer();
                     }
 
                     yield return CR_WaitActionSettle(action);
