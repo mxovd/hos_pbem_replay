@@ -18,11 +18,11 @@ from typing import NoReturn
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
-MOD_NAME = "pbem_replay"
+MOD_NAME = "PBEM Replays"
 PACKAGE_PREFIX = "pbem-replay"
 PROJECT_FILENAME = "PbemReplay.csproj"
 OUTPUT_DLL_NAME = "PbemReplay.dll"
-MOD_FOLDER_NAME = "pbem_replay"
+MOD_FOLDER_NAME = "PBEM Replays"
 
 REQUIRED_DLLS = [
     "Assembly-CSharp.dll",
