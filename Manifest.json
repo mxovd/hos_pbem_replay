@@ -1,6 +1,6 @@
 {
-    "modName": "pbem_replay",
-    "modVersion": "0.0.1",
+    "modName": "PBEM Replays",
+    "modVersion": "0.1.0",
     "modAuthor": "mxovd",
     "supportedGameVersion": "8.1.0+",
     "dependencies": "HarmonyCore",
