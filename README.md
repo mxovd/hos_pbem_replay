@@ -9,6 +9,7 @@ Mod for **Hex of Steel** PBEM games that lets a player watch a replay of actions
 - When a player opens their turn, offers a replay prompt.
 - Reconstructs replay by loading an anchor snapshot, then re-applying pending actions in order.
 - Restores the authoritative state after replay is complete (or skipped/aborted).
+- Fog-only replay events are fast-forwarded (and fog-only visual popups/sounds are skipped).
 
 ## Replay Flow
 

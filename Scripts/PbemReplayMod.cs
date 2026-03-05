@@ -119,6 +119,8 @@ internal static class PbemReplayRuntime
 
     private const float ReplayMoveSettleTimeoutSeconds = 20f;
 
+    private const float ReplayHiddenMoveSettleTimeoutSeconds = 6f;
+
     private const float ReplayZoomFactor = 0.7f;
 
     private const float ReplayFramingCoverageFactor = 0.24f;
@@ -261,6 +263,256 @@ internal static class PbemReplayRuntime
                 {
                     return false;
                 }
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryGetReplayPayloadArgs(ReplayRpcAction p_action, out object[] o_payload)
+    {
+        o_payload = null;
+        if (p_action?.Payload == null || p_action.Payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            o_payload = (object[])Utils.ConvertByteArrayToObject(p_action.Payload);
+            return o_payload != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryConvertToInt(object p_value, out int o_value)
+    {
+        if (p_value is int intValue)
+        {
+            o_value = intValue;
+            return true;
+        }
+
+        if (p_value is short shortValue)
+        {
+            o_value = shortValue;
+            return true;
+        }
+
+        if (p_value is byte byteValue)
+        {
+            o_value = byteValue;
+            return true;
+        }
+
+        if (p_value is long longValue && longValue >= int.MinValue && longValue <= int.MaxValue)
+        {
+            o_value = (int)longValue;
+            return true;
+        }
+
+        o_value = 0;
+        return false;
+    }
+
+    private static bool IsTileVisible(int p_x, int p_y)
+    {
+        Map map = GameData.Instance?.map;
+        if (map == null || p_x < 0 || p_y < 0 || p_x >= map.SizeX || p_y >= map.SizeY)
+        {
+            return false;
+        }
+
+        Tile tile = map.TilesTable[p_x, p_y];
+        return tile?.tileGO != null && !tile.tileGO.isInFogOfWar;
+    }
+
+    private static bool IsTileVisible(Tile.Coordinates p_coords)
+    {
+        return IsTileVisible(p_coords.X, p_coords.Y);
+    }
+
+    private static bool IsAnyPathTileVisible(IEnumerable<Tile.Coordinates> p_path)
+    {
+        if (p_path == null)
+        {
+            return false;
+        }
+
+        foreach (Tile.Coordinates coords in p_path)
+        {
+            if (IsTileVisible(coords))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryFindLiveUnit(string p_ownerName, int p_unitId, out Unit o_liveUnit)
+    {
+        o_liveUnit = null;
+        if (string.IsNullOrEmpty(p_ownerName) || GameData.Instance == null || !GameData.Instance.TryFindPlayerByName(p_ownerName, out Player ownerPlayer) || ownerPlayer == null)
+        {
+            return false;
+        }
+
+        o_liveUnit = ownerPlayer.ListOfUnits.FirstOrDefault(u => u != null && u.ID == p_unitId);
+        return o_liveUnit != null;
+    }
+
+    private static bool TryResolveUnitVisibility(string p_ownerName, int p_unitId, out bool o_isVisible)
+    {
+        o_isVisible = false;
+        if (!TryFindLiveUnit(p_ownerName, p_unitId, out Unit liveUnit))
+        {
+            return false;
+        }
+
+        o_isVisible = liveUnit.unitGO != null && liveUnit.unitGO.tileGO != null && !liveUnit.unitGO.tileGO.isInFogOfWar;
+        return true;
+    }
+
+    private static bool TryResolveUnitVisibility(Unit p_unitIdentity, out bool o_isVisible)
+    {
+        o_isVisible = false;
+        return p_unitIdentity != null
+            && !string.IsNullOrEmpty(p_unitIdentity.OwnerName)
+            && TryResolveUnitVisibility(p_unitIdentity.OwnerName, p_unitIdentity.ID, out o_isVisible);
+    }
+
+    private static bool IsReplayActionOnlyInFogOfWar(ReplayRpcAction p_action)
+    {
+        if (p_action == null || string.IsNullOrEmpty(p_action.RpcName) || GameData.Instance?.map == null || !TryGetReplayPayloadArgs(p_action, out object[] payload))
+        {
+            return false;
+        }
+
+        switch (p_action.RpcName)
+        {
+            case "RPC_MoveUnit":
+                if (payload.Length < 2 || !(payload[1] is List<Tile.Coordinates> movePath) || movePath.Count == 0)
+                {
+                    return false;
+                }
+
+                return !IsAnyPathTileVisible(movePath);
+            case "RPC_AttackUnit":
+                if (payload.Length < 2 || !(payload[0] is Unit attackerIdentity) || !(payload[1] is Unit defenderIdentity))
+                {
+                    return false;
+                }
+
+                bool resolvedAnyAttackUnit = false;
+                bool attackerVisible = false;
+                if (TryResolveUnitVisibility(attackerIdentity, out bool attackerIsVisible))
+                {
+                    resolvedAnyAttackUnit = true;
+                    attackerVisible = attackerIsVisible;
+                }
+
+                bool defenderVisible = false;
+                if (TryResolveUnitVisibility(defenderIdentity, out bool defenderIsVisible))
+                {
+                    resolvedAnyAttackUnit = true;
+                    defenderVisible = defenderIsVisible;
+                }
+
+                return resolvedAnyAttackUnit && !attackerVisible && !defenderVisible;
+            case "RPC_KillUnit":
+            case "RPC_EmbarkDisembark":
+            case "RPC_DespawnUnit":
+                if (payload.Length < 2 || !TryConvertToInt(payload[0], out int unitId) || !(payload[1] is string ownerName))
+                {
+                    return false;
+                }
+
+                return TryResolveUnitVisibility(ownerName, unitId, out bool unitVisibleForSimpleAction) && !unitVisibleForSimpleAction;
+            case "RPC_SpawnUnit":
+                if (payload.Length < 2 || !TryConvertToInt(payload[0], out int spawnX) || !TryConvertToInt(payload[1], out int spawnY))
+                {
+                    return false;
+                }
+
+                return !IsTileVisible(spawnX, spawnY);
+            case "RPC_CaptureVP":
+                if (payload.Length < 3)
+                {
+                    return false;
+                }
+
+                bool tileVisibleForCapture = TryConvertToInt(payload[1], out int captureX)
+                    && TryConvertToInt(payload[2], out int captureY)
+                    && IsTileVisible(captureX, captureY);
+
+                bool unitVisibleForCapture = payload[0] is Unit captureUnitIdentity
+                    && TryResolveUnitVisibility(captureUnitIdentity, out bool captureUnitVisible)
+                    && captureUnitVisible;
+
+                return !tileVisibleForCapture && !unitVisibleForCapture;
+            case "RPC_SyncTile":
+                if (payload.Length < 1 || !(payload[0] is Tile.Coordinates tileCoords))
+                {
+                    return false;
+                }
+
+                return !IsTileVisible(tileCoords);
+            case "RPC_SwapUnits":
+                if (payload.Length < 8
+                    || !TryConvertToInt(payload[2], out int aX)
+                    || !TryConvertToInt(payload[3], out int aY)
+                    || !TryConvertToInt(payload[6], out int bX)
+                    || !TryConvertToInt(payload[7], out int bY))
+                {
+                    return false;
+                }
+
+                return !IsTileVisible(aX, aY) && !IsTileVisible(bX, bY);
+            case "RPC_ShowDamage":
+            case "RPC_DisplayXP":
+            case "RPC_DisplayFuelLoss":
+            case "RPC_DisplayAmmoLoss":
+                if (payload.Length < 2 || !TryConvertToInt(payload[0], out int textX) || !TryConvertToInt(payload[1], out int textY))
+                {
+                    return false;
+                }
+
+                return !IsTileVisible(textX, textY);
+            case "RPC_PlaySound":
+                if (payload.Length < 4 || !TryConvertToInt(payload[0], out int soundX) || !TryConvertToInt(payload[1], out int soundY))
+                {
+                    return false;
+                }
+
+                if (payload[3] is string soundCategory && string.Equals(soundCategory, "UI", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                return !IsTileVisible(soundX, soundY);
+            default:
+                return false;
+        }
+    }
+
+    private static bool ShouldSkipReplayActionInvocationWhenFogOnly(string p_rpcName)
+    {
+        if (string.IsNullOrEmpty(p_rpcName))
+        {
+            return false;
+        }
+
+        switch (p_rpcName)
+        {
+            case "RPC_ShowDamage":
+            case "RPC_DisplayXP":
+            case "RPC_DisplayFuelLoss":
+            case "RPC_DisplayAmmoLoss":
+            case "RPC_PlaySound":
+                return true;
             default:
                 return false;
         }
@@ -1258,6 +1510,24 @@ internal static class PbemReplayRuntime
                     continue;
                 }
 
+                bool isFogOnlyAction = IsReplayActionOnlyInFogOfWar(action);
+                if (isFogOnlyAction && ShouldSkipReplayActionInvocationWhenFogOnly(action.RpcName))
+                {
+                    continue;
+                }
+
+                bool restoreQuickMovementAfterAction = false;
+                bool previousQuickMovement = false;
+                if (isFogOnlyAction && action.RpcName == "RPC_MoveUnit" && PlayerSettings.Instance != null)
+                {
+                    previousQuickMovement = PlayerSettings.Instance.IsQuickMovement;
+                    if (!previousQuickMovement)
+                    {
+                        PlayerSettings.Instance.IsQuickMovement = true;
+                        restoreQuickMovementAfterAction = true;
+                    }
+                }
+
                 try
                 {
                     method.Invoke(manager, new object[] { action.Payload });
@@ -1272,7 +1542,12 @@ internal static class PbemReplayRuntime
                     RebuildReplayFogForViewer();
                 }
 
-                yield return CR_WaitActionSettle(action);
+                yield return CR_WaitActionSettle(action, isFogOnlyAction);
+
+                if (restoreQuickMovementAfterAction && PlayerSettings.Instance != null)
+                {
+                    PlayerSettings.Instance.IsQuickMovement = previousQuickMovement;
+                }
             }
         }
 
@@ -1392,13 +1667,15 @@ internal static class PbemReplayRuntime
         }
     }
 
-    private static IEnumerator CR_WaitActionSettle(ReplayRpcAction p_action)
+    private static IEnumerator CR_WaitActionSettle(ReplayRpcAction p_action, bool p_isFogOnlyAction)
     {
         string rpcName = p_action != null ? p_action.RpcName : string.Empty;
         if (rpcName == "RPC_MoveUnit")
         {
             float estimatedMoveDuration = EstimateMoveReplayDurationSeconds(p_action?.Payload);
-            float timeout = Mathf.Max(ReplayMoveSettleTimeoutSeconds, estimatedMoveDuration + 2f);
+            float timeout = p_isFogOnlyAction
+                ? Mathf.Clamp(Mathf.Max(0.3f, estimatedMoveDuration + 0.35f), 0.3f, ReplayHiddenMoveSettleTimeoutSeconds)
+                : Mathf.Max(ReplayMoveSettleTimeoutSeconds, estimatedMoveDuration + 2f);
             bool observedAnyMovingUnit = false;
             while (timeout > 0f)
             {
@@ -1414,6 +1691,11 @@ internal static class PbemReplayRuntime
                 yield return null;
             }
 
+            if (p_isFogOnlyAction)
+            {
+                yield break;
+            }
+
             float pauseSeconds;
             if (observedAnyMovingUnit)
             {
@@ -1425,6 +1707,11 @@ internal static class PbemReplayRuntime
             }
 
             yield return new WaitForSecondsRealtime(ScaleReplayPause(pauseSeconds));
+            yield break;
+        }
+
+        if (p_isFogOnlyAction)
+        {
             yield break;
         }
 
